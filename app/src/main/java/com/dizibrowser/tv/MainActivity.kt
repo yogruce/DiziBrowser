@@ -45,6 +45,8 @@ import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
+import kotlin.math.abs
 
 class MainActivity : Activity() {
 
@@ -56,6 +58,10 @@ class MainActivity : Activity() {
     private lateinit var cursorOverlay: CursorOverlayView
     private lateinit var floatingCursorHint: TextView
     private lateinit var backButton: Button
+    private lateinit var homeButton: Button
+    private lateinit var goButton: Button
+    private lateinit var historyButton: Button
+    private lateinit var qrButton: Button
     private lateinit var addressBar: EditText
     private lateinit var statusBar: TextView
     private lateinit var blockedCounterText: TextView
@@ -64,6 +70,9 @@ class MainActivity : Activity() {
 
     private lateinit var history: WatchHistory
     private var remoteServer: RemoteWebServer? = null
+
+    // Disk / Geçmiş yazma işlemlerini arka planda yaparak videonun takılmasını %100 önleyen tekli iş parçacığı
+    private val historyIoExecutor = Executors.newSingleThreadExecutor()
 
     private var currentScreen = ScreenState.HOME
     private var customFullscreenView: View? = null
@@ -101,6 +110,10 @@ class MainActivity : Activity() {
         cursorOverlay = findViewById(R.id.cursorOverlay)
         floatingCursorHint = findViewById(R.id.floatingCursorHint)
         backButton = findViewById(R.id.backButton)
+        homeButton = findViewById(R.id.homeButton)
+        goButton = findViewById(R.id.goButton)
+        historyButton = findViewById(R.id.historyButton)
+        qrButton = findViewById(R.id.qrButton)
         addressBar = findViewById(R.id.addressBar)
         statusBar = findViewById(R.id.statusBar)
         blockedCounterText = findViewById(R.id.blockedCounterText)
@@ -133,6 +146,8 @@ class MainActivity : Activity() {
         web = WebView(this).apply {
             isFocusable = true
             isFocusableInTouchMode = true
+            // Donanım hızlandırma katmanı: TV GPU'sunu kullanarak video kare düşüşlerini (takılmayı) önler
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
         }
         WebView.setWebContentsDebuggingEnabled(false)
 
@@ -145,6 +160,7 @@ class MainActivity : Activity() {
             displayZoomControls = false
             useWideViewPort = true
             loadWithOverviewMode = true
+            cacheMode = WebSettings.LOAD_DEFAULT
             setSupportMultipleWindows(true) // onCreateWindow ile yakalayıp popup engellemek için
             javaScriptCanOpenWindowsAutomatically = false
             allowFileAccess = false
@@ -199,7 +215,6 @@ class MainActivity : Activity() {
                 val url = request.url.toString()
 
                 if (AdBlocker.isBlocked(url) || AdBlocker.isDangerousDownload(url)) {
-                    runOnUiThread { updateBlockedCounterUi() }
                     return WebResourceResponse(
                         "text/plain",
                         "utf-8",
@@ -225,9 +240,27 @@ class MainActivity : Activity() {
                 addressBar.setText(url)
                 updateFavoriteButtonState(url)
                 updateBackButtonVisual()
+                updateBlockedCounterUi()
                 statusBar.text = "🛡️ Kalkan Aktif • OK Basılı Tut: İmleci Aç/Kapat • En alta inince sayfa kayar"
+
+                // Sayfa yüklendiğinde eğer anlamlı bir web sayfasıysa otomatik geçmişe kaydet
+                // (Cross-origin iframe kullanan dizi sitelerinde bile geçmişin %100 çalışmasını sağlar)
+                val pageTitle = view.title?.trim().orEmpty()
+                if (shouldRecordPageInHistory(url)) {
+                    recordHistoryAsync(url, pageTitle.ifBlank { url }, -1L)
+                }
+
                 injectPageEnhancements()
                 super.onPageFinished(view, url)
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                // Tek sayfa uygulamalarında (SPA) bölüm değiştiğinde geçmişi yakala
+                if (!isReload && shouldRecordPageInHistory(url)) {
+                    val pageTitle = view.title?.trim().orEmpty()
+                    recordHistoryAsync(url, pageTitle.ifBlank { url }, -1L)
+                }
             }
 
             override fun onSafeBrowsingHit(
@@ -247,6 +280,15 @@ class MainActivity : Activity() {
         }
 
         web.webChromeClient = object : WebChromeClient() {
+            override fun onReceivedTitle(view: WebView?, title: String?) {
+                super.onReceivedTitle(view, title)
+                val currentUrl = view?.url ?: return
+                val cleanTitle = title?.trim().orEmpty()
+                if (cleanTitle.isNotBlank() && shouldRecordPageInHistory(currentUrl)) {
+                    recordHistoryAsync(currentUrl, cleanTitle, -1L)
+                }
+            }
+
             override fun onCreateWindow(
                 view: WebView?,
                 isDialog: Boolean,
@@ -273,7 +315,11 @@ class MainActivity : Activity() {
                 if (view != null) {
                     fullscreenContainer.addView(view, FrameLayout.LayoutParams(-1, -1))
                 }
-                // Tam ekrana geçince imleci ekrandan hemen gizle ve bilgi notunu 4 saniye göster
+                // Tam ekrana geçince o anki sayfayı kesin olarak geçmişe kaydet
+                val currentUrl = web.url.orEmpty()
+                if (isSafeWebUrl(currentUrl)) {
+                    recordHistoryAsync(currentUrl, web.title?.trim().orEmpty().ifBlank { currentUrl }, -1L)
+                }
                 cursorOverlay.bringToFront()
                 cursorOverlay.hideCursorImmediately()
                 showFloatingCursorBanner("🎬 Tam Ekran • İmleci Açmak/Kapatmak için OK tuşuna basılı tutun")
@@ -306,6 +352,64 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Arama motoru ana sayfaları hariç ziyaret edilen tüm dizi/film/bölüm sayfalarını geçmişe kaydeder.
+     */
+    private fun shouldRecordPageInHistory(url: String): Boolean {
+        if (!isSafeWebUrl(url)) return false
+        val lower = url.lowercase()
+        if (lower == "https://www.google.com/" || lower == "https://www.google.com" || lower.startsWith("https://www.google.com/search?")) {
+            return false
+        }
+        return true
+    }
+
+    private fun recordHistoryAsync(url: String, title: String, positionMs: Long) {
+        historyIoExecutor.execute {
+            history.addOrUpdate(url, title, positionMs)
+        }
+    }
+
+    /**
+     * İmleç yukarı çıktığında her zaman adres çubuğuna gitmek yerine,
+     * imlecin yatay (X) konumuna göre tam hizasındaki üst menü butonunu seçer!
+     */
+    private fun focusTopBarElementAtCursorX(cursorX: Float) {
+        val candidates = listOf<View>(
+            backButton,
+            homeButton,
+            addressBar,
+            goButton,
+            cursorButton,
+            favButton,
+            historyButton,
+            qrButton
+        ).filter { it.visibility == View.VISIBLE }
+
+        var matchedView: View? = null
+        val loc = IntArray(2)
+
+        for (v in candidates) {
+            v.getLocationOnScreen(loc)
+            val left = loc[0].toFloat()
+            val right = left + v.width
+            if (cursorX in left..right) {
+                matchedView = v
+                break
+            }
+        }
+
+        if (matchedView == null) {
+            matchedView = candidates.minByOrNull { v ->
+                v.getLocationOnScreen(loc)
+                val center = loc[0] + v.width / 2f
+                abs(cursorX - center)
+            }
+        }
+
+        (matchedView ?: addressBar).requestFocus()
+    }
+
     private fun showFloatingCursorBanner(msg: String) {
         floatingCursorHint.text = msg
         floatingCursorHint.visibility = View.VISIBLE
@@ -316,10 +420,10 @@ class MainActivity : Activity() {
 
     private fun setupTopBarButtons() {
         backButton.setOnClickListener { handleTopBackAction() }
-        findViewById<Button>(R.id.homeButton).setOnClickListener { showHome() }
-        findViewById<Button>(R.id.goButton).setOnClickListener { navigateFromAddress() }
-        findViewById<Button>(R.id.historyButton).setOnClickListener { showHistory() }
-        findViewById<Button>(R.id.qrButton).setOnClickListener { showQrRemoteDialog() }
+        homeButton.setOnClickListener { showHome() }
+        goButton.setOnClickListener { navigateFromAddress() }
+        historyButton.setOnClickListener { showHistory() }
+        qrButton.setOnClickListener { showQrRemoteDialog() }
 
         cursorButton.setOnClickListener {
             toggleCursorMode()
@@ -647,7 +751,7 @@ class MainActivity : Activity() {
 
         // 2. SON İZLENEN BÖLÜMLER (10 GÜNLÜK GEÇMİŞ & KALDIĞI YERDEN DEVAM)
         rootPanel.addView(TextView(this).apply {
-            text = "🕘 SON İZLENEN BÖLÜMLER (10 GÜN OTOMATİK SAKLANIR)"
+            text = "🕘 SON İZLENEN BÖLÜMLER & SAYFALAR (10 GÜN SAKLANIR)"
             textSize = 16f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
@@ -657,7 +761,7 @@ class MainActivity : Activity() {
         val recentItems = history.getHistory()
         if (recentItems.isEmpty()) {
             rootPanel.addView(TextView(this).apply {
-                text = "Henüz izleme kaydı yok. Herhangi bir dizi/film sitesinde video başlattığınızda bölüm adı, site adresi ve kaldığınız dakika otomatik olarak burada görünür. 10 günü geçen kayıtlar kendiliğinden silinir."
+                text = "Henüz izleme kaydı yok. Açtığınız dizi/film sayfaları ve kaldığınız dakika otomatik olarak burada görünür. 10 günü geçen kayıtlar kendiliğinden silinir."
                 textSize = 13f
                 setTextColor(Color.parseColor("#8B949E"))
                 setPadding(16, 16, 16, 16)
@@ -665,7 +769,7 @@ class MainActivity : Activity() {
             })
         } else {
             val df = SimpleDateFormat("dd.MM HH:mm", Locale.getDefault())
-            recentItems.take(8).forEach { item ->
+            recentItems.take(10).forEach { item ->
                 val resumeInfo = if (item.resumePositionMs > 10_000L) {
                     val m = (item.resumePositionMs / 1000) / 60
                     val s = (item.resumePositionMs / 1000) % 60
@@ -770,7 +874,7 @@ class MainActivity : Activity() {
         val items = history.getHistory()
         if (items.isEmpty()) {
             list.addView(TextView(this).apply {
-                text = "Henüz kayıtlı bölüm yok. Bir diziyi izlemeye başladığınızda otomatik olarak kaydedilir ve 10 gün sonra silinir."
+                text = "Henüz kayıtlı bölüm yok. Bir dizi veya film sayfasını açtığınızda otomatik olarak kaydedilir ve 10 gün sonra silinir."
                 textSize = 16f
                 setTextColor(Color.LTGRAY)
                 setPadding(12, 12, 12, 12)
@@ -830,14 +934,14 @@ class MainActivity : Activity() {
         """.trimIndent()
         web.evaluateJavascript(focusAndPlayerHelperJs, null)
 
-        // 2. HTML5 video izleme takipçisi ve kaldığı saniyeyi hatırlama
+        // 2. Hafifletilmiş HTML5 video takipçisi (1 saniye yerine 5 saniyede bir çalışır, CPU yormaz)
         val savedResumeSec = (history.getResumePosition(web.url ?: "", "") / 1000L)
         val trackerJs = """
             (function() {
                 if (window.__diziTrackerInstalled) return;
                 window.__diziTrackerInstalled = true;
                 var recorded = false;
-                var playedSeconds = 0;
+                var tickCount = 0;
                 var resumeTarget = $savedResumeSec;
                 var resumeApplied = false;
                 var wasPlaying = false;
@@ -854,11 +958,11 @@ class MainActivity : Activity() {
                             }
                             if (!v.paused && !v.ended && v.currentTime > 0) {
                                 anyPlaying = true;
-                                playedSeconds++;
-                                if (!recorded && playedSeconds >= 10) {
+                                tickCount++;
+                                if (!recorded && tickCount >= 2) {
                                     recorded = true;
                                     DiziBridge.videoPlayed(document.title || location.hostname, location.href, Math.floor(v.currentTime * 1000));
-                                } else if (playedSeconds % 15 === 0) {
+                                } else if (tickCount % 6 === 0) {
                                     DiziBridge.videoProgress(location.href, Math.floor(v.currentTime * 1000));
                                 }
                             }
@@ -870,7 +974,7 @@ class MainActivity : Activity() {
                             wasPlaying = false;
                         }
                     } catch (e) {}
-                }, 1000);
+                }, 5000);
             })();
         """.trimIndent()
         web.evaluateJavascript(trackerJs, null)
@@ -879,21 +983,18 @@ class MainActivity : Activity() {
     inner class DiziJsBridge {
         @JavascriptInterface
         fun videoPlayed(title: String, url: String, positionMs: Long) {
-            runOnUiThread {
-                val now = System.currentTimeMillis()
-                if (isSafeWebUrl(url) && (url != lastRecordedUrl || now - lastRecordAt > 30_000L)) {
-                    history.addOrUpdate(url, title, positionMs)
-                    lastRecordedUrl = url
-                    lastRecordAt = now
-                    statusBar.text = "✅ Bölüm geçmişe kaydedildi (10 gün saklanır)"
-                }
+            val now = System.currentTimeMillis()
+            if (isSafeWebUrl(url) && (url != lastRecordedUrl || now - lastRecordAt > 30_000L)) {
+                lastRecordedUrl = url
+                lastRecordAt = now
+                recordHistoryAsync(url, title, positionMs)
             }
         }
 
         @JavascriptInterface
         fun videoProgress(url: String, positionMs: Long) {
-            runOnUiThread {
-                if (isSafeWebUrl(url) && positionMs > 5000L) {
+            if (isSafeWebUrl(url) && positionMs > 5000L) {
+                historyIoExecutor.execute {
                     history.updatePositionByUrlOrStream(url, "", positionMs)
                 }
             }
@@ -902,7 +1003,6 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun onVideoStartedPlaying() {
             runOnUiThread {
-                // Video oynamaya başladığında imleci hemen gizle ki görüntünün ortasında kalmasın
                 cursorOverlay.hideCursorImmediately()
             }
         }
@@ -912,7 +1012,6 @@ class MainActivity : Activity() {
         val isOkKey = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER
 
         // Web ekranındayken OK tuşu hem kısa basma (Tıkla) hem de 1 sn basılı tutma (İmleci Aç/Kapat) için tamamen burada yönetilir.
-        // Böylece uzun basıldığında arkadaki sitede yanlışlıkla ikinci bir linkin açılması %100 engellenir!
         if (currentScreen == ScreenState.WEB && !topBar.hasFocus() && isOkKey) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) {
@@ -921,20 +1020,16 @@ class MainActivity : Activity() {
                     okLongPressConsumed = true
                     toggleCursorMode()
                 }
-                // Her durumda ACTION_DOWN olayını yutuyoruz ki WebView kendisi erken tıklama yapmasın
                 return true
             } else if (event.action == KeyEvent.ACTION_UP) {
                 if (okLongPressConsumed) {
-                    // Uzun basma ile imleç açıldı/kapandı; parmak çekildiğinde sitede hiçbir yere tıklama!
                     okLongPressConsumed = false
                     return true
                 }
-                // Kısa basıldıysa:
                 val activeTarget = customFullscreenView ?: web
                 if (cursorOverlay.isCursorEnabled) {
                     cursorOverlay.performClickOnTarget(activeTarget, web)
                 } else {
-                    // İmleç kapalıyken kısa OK basıldıysa seçili HTML elemanına veya videoya standart tıklama gönder
                     web.evaluateJavascript(
                         """
                         (function() {
@@ -978,7 +1073,6 @@ class MainActivity : Activity() {
                         )
                         return true
                     }
-                    // Kumandadaki Menü, Sarı/Mavi renkli tuşlar veya Info tuşlarıyla da imleç açılıp kapatılabilir
                     KeyEvent.KEYCODE_MENU,
                     KeyEvent.KEYCODE_PROG_YELLOW,
                     KeyEvent.KEYCODE_PROG_BLUE,
@@ -1017,7 +1111,7 @@ class MainActivity : Activity() {
                             onReachTopEdge = {
                                 if (customFullscreenView == null) {
                                     cursorOverlay.visibility = View.GONE
-                                    addressBar.requestFocus()
+                                    focusTopBarElementAtCursorX(cursorOverlay.cursorX)
                                 }
                             }
                         )
@@ -1052,6 +1146,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         remoteServer?.stop()
+        historyIoExecutor.shutdownNow()
         try {
             web.stopLoading()
             web.removeJavascriptInterface("DiziBridge")

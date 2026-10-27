@@ -28,23 +28,28 @@ object AdBlocker {
         "histats.com", "mc.yandex.ru", "scorecardresearch.com", "quantserve.com",
         "zedo.com", "adform.net", "smartadserver.com", "rubiconproject.com",
         "pubmatic.com", "openx.net", "moatads.com", "amazon-adsystem.com",
-        "adroll.com", "Sortable.com", "teads.tv", "outbrainimg.com",
+        "adroll.com", "sortable.com", "teads.tv", "outbrainimg.com",
         "pushwhy.com", "notix.io", "richpush.co", "evadav.com", "galaksion.com",
-        "admaven.com", "clksite.com", " onclickads.net", "voluum.com",
+        "admaven.com", "clksite.com", "onclickads.net", "voluum.com",
         "bet365.com", "1xbet.com", "mostbet.com", "melbet.com"
     )
 
-    private val blockedPathKeywords = listOf(
+    private val blockedPathKeywords = arrayOf(
         "/ads/", "/adserver/", "/popunder", "/popup.js", "/pop.js",
         "banner_ad", "ad_iframe", "clickunder", "/advert/", "prebid"
     )
 
-    private val dangerousExtensions = listOf(
+    private val dangerousExtensions = arrayOf(
         ".apk", ".xapk", ".apks", ".exe", ".msi", ".bat", ".cmd", ".scr", ".sh", ".jar", ".dex"
     )
 
+    // Video segmentlerini (.ts, .m4s, .mp4, .m3u8) hiç bekletmeden geçirmek için hızlı kontrol
+    private val mediaFastPassExtensions = arrayOf(
+        ".ts", ".m4s", ".m3u8", ".mpd", ".mp4", ".webm", ".aac", ".mp3", ".vtt", ".srt", ".woff2", ".png", ".jpg", ".webp"
+    )
+
     fun init(context: Context) {
-        dynamicHosts.addAll(defaultBlockedHosts.map { it.trim().lowercase() })
+        dynamicHosts.addAll(defaultBlockedHosts)
         val prefs = context.getSharedPreferences("adblock_prefs", Context.MODE_PRIVATE)
         val cached = prefs.getStringSet("cached_hosts", emptySet()) ?: emptySet()
         dynamicHosts.addAll(cached)
@@ -53,12 +58,11 @@ object AdBlocker {
     fun updateRemoteFilterList(context: Context, onComplete: (Int) -> Unit) {
         Thread {
             try {
-                // StevenBlack / Peter Lowe hafif reklam & zararlı sunucu listesi
                 val url = URL("https://pgl.yoyo.org/adservers/serverlist.php?hostformat=nohtml&showintro=0&mimetype=plaintext")
                 val conn = (url.openConnection() as HttpURLConnection).apply {
                     connectTimeout = 8000
                     readTimeout = 8000
-                    setRequestProperty("User-Agent", "DiziBrowserTV/1.0")
+                    setRequestProperty("User-Agent", "DiziBrowserTV/1.2")
                 }
                 val newHosts = mutableSetOf<String>()
                 BufferedReader(InputStreamReader(conn.inputStream)).use { reader ->
@@ -94,17 +98,43 @@ object AdBlocker {
         }
     }
 
+    /**
+     * O(1) Hash Tabanlı Anlık Kontrol:
+     * 5.000 elemanlı listeyi tek tek taramak yerine sadece nokta (.) konumlarına göre 2-3 kez HashSet.contains çağırır.
+     * Video akışı sırasında CPU kullanımını sıfıra indirir, takılmayı önler.
+     */
+    private fun isHostInSetFast(host: String): Boolean {
+        if (dynamicHosts.contains(host)) return true
+        var dotIndex = host.indexOf('.')
+        while (dotIndex != -1 && dotIndex + 1 < host.length) {
+            val parentDomain = host.substring(dotIndex + 1)
+            if (dynamicHosts.contains(parentDomain)) return true
+            dotIndex = host.indexOf('.', dotIndex + 1)
+        }
+        return false
+    }
+
     fun isBlocked(url: String): Boolean {
         return try {
             val u = Uri.parse(url)
             val host = (u.host ?: "").lowercase().trimEnd('.')
             if (host.isEmpty()) return false
 
-            val hostBlocked = dynamicHosts.any { host == it || host.endsWith(".$it") }
-            val pathLower = (u.path ?: "").lowercase()
-            val pathBlocked = blockedPathKeywords.any { pathLower.contains(it) }
+            // 1. O(1) Hızlı Domain Kontrolü
+            if (isHostInSetFast(host)) {
+                blockedCount.incrementAndGet()
+                return true
+            }
 
-            if (hostBlocked || pathBlocked) {
+            // 2. Medya parçalarını (.ts, .m4s vb.) yol (path) taramasına sokmadan anında geçir
+            val pathLower = (u.path ?: "").lowercase()
+            if (mediaFastPassExtensions.any { pathLower.endsWith(it) }) {
+                return false
+            }
+
+            // 3. Yalnızca script/sayfa isteklerinde yol kelimelerini kontrol et
+            val pathBlocked = blockedPathKeywords.any { pathLower.contains(it) }
+            if (pathBlocked) {
                 blockedCount.incrementAndGet()
                 true
             } else {

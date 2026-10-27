@@ -11,14 +11,26 @@ android {
         applicationId = "com.dizibrowser.tv"
         minSdk = 21
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.0.0"
+        versionCode = 5
+        versionName = "1.2.0"
+    }
+
+    signingConfigs {
+        create("permanent") {
+            storeFile = file("dizibrowser-keystore.jks")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("permanent")
+        }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("permanent")
         }
     }
 

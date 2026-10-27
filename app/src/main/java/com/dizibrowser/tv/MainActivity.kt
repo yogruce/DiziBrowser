@@ -55,6 +55,7 @@ class MainActivity : Activity() {
     private lateinit var fullscreenContainer: FrameLayout
     private lateinit var cursorOverlay: CursorOverlayView
     private lateinit var floatingCursorHint: TextView
+    private lateinit var backButton: Button
     private lateinit var addressBar: EditText
     private lateinit var statusBar: TextView
     private lateinit var blockedCounterText: TextView
@@ -73,7 +74,7 @@ class MainActivity : Activity() {
     private var lastRecordedUrl = ""
     private var lastRecordAt = 0L
 
-    // OK tuşuna basılı tutarak imleci her an (video tam ekranda bile) açıp kapatma
+    // OK tuşuna basılı tutulduğunda web sayfasının yanlışlıkla tıklama algılamasını tamamen önleyen bayrak
     private var okLongPressConsumed = false
     private val uiHandler = Handler(Looper.getMainLooper())
     private val hideHintRunnable = Runnable {
@@ -99,6 +100,7 @@ class MainActivity : Activity() {
         fullscreenContainer = findViewById(R.id.fullscreenContainer)
         cursorOverlay = findViewById(R.id.cursorOverlay)
         floatingCursorHint = findViewById(R.id.floatingCursorHint)
+        backButton = findViewById(R.id.backButton)
         addressBar = findViewById(R.id.addressBar)
         statusBar = findViewById(R.id.statusBar)
         blockedCounterText = findViewById(R.id.blockedCounterText)
@@ -214,6 +216,7 @@ class MainActivity : Activity() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 addressBar.setText(url)
                 updateFavoriteButtonState(url)
+                updateBackButtonVisual()
                 statusBar.text = "⏳ Yükleniyor: $url"
                 super.onPageStarted(view, url, favicon)
             }
@@ -221,6 +224,7 @@ class MainActivity : Activity() {
             override fun onPageFinished(view: WebView, url: String) {
                 addressBar.setText(url)
                 updateFavoriteButtonState(url)
+                updateBackButtonVisual()
                 statusBar.text = "🛡️ Kalkan Aktif • OK Basılı Tut: İmleci Aç/Kapat • En alta inince sayfa kayar"
                 injectPageEnhancements()
                 super.onPageFinished(view, url)
@@ -311,6 +315,7 @@ class MainActivity : Activity() {
     }
 
     private fun setupTopBarButtons() {
+        backButton.setOnClickListener { handleTopBackAction() }
         findViewById<Button>(R.id.homeButton).setOnClickListener { showHome() }
         findViewById<Button>(R.id.goButton).setOnClickListener { navigateFromAddress() }
         findViewById<Button>(R.id.historyButton).setOnClickListener { showHistory() }
@@ -343,6 +348,32 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun handleTopBackAction() {
+        if (customFullscreenView != null) {
+            web.webChromeClient?.onHideCustomView()
+            return
+        }
+        if (currentScreen == ScreenState.HISTORY) {
+            showHome()
+            return
+        }
+        if (currentScreen == ScreenState.WEB) {
+            if (web.canGoBack()) {
+                web.goBack()
+                activateWebCursorNow()
+            } else {
+                showHome()
+            }
+            return
+        }
+        Toast.makeText(this, "Zaten ana ekrandasınız", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun updateBackButtonVisual() {
+        val canGoBack = (currentScreen == ScreenState.WEB && web.canGoBack()) || currentScreen == ScreenState.HISTORY || currentScreen == ScreenState.WEB
+        backButton.alpha = if (canGoBack) 1.0f else 0.55f
+    }
+
     private fun toggleCursorMode() {
         val next = !cursorOverlay.isCursorEnabled
         cursorOverlay.isCursorEnabled = next
@@ -351,7 +382,6 @@ class MainActivity : Activity() {
 
         if (currentScreen == ScreenState.WEB) {
             if (next) {
-                // İmleç açıldığında odağı üst bardan alıp hemen web sayfası ortasında imleci aktif et
                 topBar.clearFocus()
                 web.requestFocus()
                 cursorOverlay.visibility = View.VISIBLE
@@ -491,6 +521,7 @@ class MainActivity : Activity() {
         cursorOverlay.isCursorEnabled = true
         cursorButton.text = "🖱️ İmleç: Açık"
         cursorButton.setTextColor(Color.parseColor("#00E5FF"))
+        updateBackButtonVisual()
 
         host.removeAllViews()
         (web.parent as? ViewGroup)?.removeView(web)
@@ -506,6 +537,7 @@ class MainActivity : Activity() {
 
     private fun showHome() {
         currentScreen = ScreenState.HOME
+        updateBackButtonVisual()
         // Ana ekranda kumandayla butonlar arasında standart geçiş yapılabilmesi için imleci gizle
         cursorOverlay.visibility = View.GONE
         floatingCursorHint.visibility = View.GONE
@@ -696,6 +728,7 @@ class MainActivity : Activity() {
 
     private fun showHistory() {
         currentScreen = ScreenState.HISTORY
+        updateBackButtonVisual()
         cursorOverlay.visibility = View.GONE
         floatingCursorHint.visibility = View.GONE
         host.removeAllViews()
@@ -878,7 +911,8 @@ class MainActivity : Activity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val isOkKey = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER
 
-        // Web ekranındayken (veya tam ekran videodayken) OK tuşuna 1 saniye basılı tutunca imleci Aç/Kapat!
+        // Web ekranındayken OK tuşu hem kısa basma (Tıkla) hem de 1 sn basılı tutma (İmleci Aç/Kapat) için tamamen burada yönetilir.
+        // Böylece uzun basıldığında arkadaki sitede yanlışlıkla ikinci bir linkin açılması %100 engellenir!
         if (currentScreen == ScreenState.WEB && !topBar.hasFocus() && isOkKey) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) {
@@ -886,21 +920,37 @@ class MainActivity : Activity() {
                 } else if (event.repeatCount >= 3 && !okLongPressConsumed) {
                     okLongPressConsumed = true
                     toggleCursorMode()
-                    return true
                 }
-                if (cursorOverlay.isCursorEnabled) {
-                    return true
-                }
+                // Her durumda ACTION_DOWN olayını yutuyoruz ki WebView kendisi erken tıklama yapmasın
+                return true
             } else if (event.action == KeyEvent.ACTION_UP) {
                 if (okLongPressConsumed) {
+                    // Uzun basma ile imleç açıldı/kapandı; parmak çekildiğinde sitede hiçbir yere tıklama!
                     okLongPressConsumed = false
                     return true
                 }
+                // Kısa basıldıysa:
+                val activeTarget = customFullscreenView ?: web
                 if (cursorOverlay.isCursorEnabled) {
-                    val activeTarget = customFullscreenView ?: web
                     cursorOverlay.performClickOnTarget(activeTarget, web)
-                    return true
+                } else {
+                    // İmleç kapalıyken kısa OK basıldıysa seçili HTML elemanına veya videoya standart tıklama gönder
+                    web.evaluateJavascript(
+                        """
+                        (function() {
+                            var el = document.activeElement;
+                            if (el && el !== document.body && typeof el.click === 'function') {
+                                el.click();
+                            } else {
+                                var v = document.querySelector('video');
+                                if (v) { v.paused ? v.play() : v.pause(); }
+                            }
+                        })();
+                        """.trimIndent(),
+                        null
+                    )
                 }
+                return true
             }
         }
 
@@ -928,7 +978,7 @@ class MainActivity : Activity() {
                         )
                         return true
                     }
-                    // Kumandadaki Menü, Sarı/Mavi renkli tuşlar veya Kanal tuşlarıyla da imleç açılıp kapatılabilir
+                    // Kumandadaki Menü, Sarı/Mavi renkli tuşlar veya Info tuşlarıyla da imleç açılıp kapatılabilir
                     KeyEvent.KEYCODE_MENU,
                     KeyEvent.KEYCODE_PROG_YELLOW,
                     KeyEvent.KEYCODE_PROG_BLUE,

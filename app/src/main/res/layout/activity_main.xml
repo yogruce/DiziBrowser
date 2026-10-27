@@ -17,6 +17,17 @@
         android:layout_height="54dp">
 
         <Button
+            android:id="@+id/backButton"
+            android:text="⬅ Geri"
+            android:textSize="12sp"
+            android:textColor="#FFFFFF"
+            android:background="@drawable/tv_button_bg"
+            android:paddingHorizontal="10dp"
+            android:layout_marginEnd="4dp"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp" />
+
+        <Button
             android:id="@+id/homeButton"
             android:text="🏠 Ana Ekran"
             android:textSize="12sp"

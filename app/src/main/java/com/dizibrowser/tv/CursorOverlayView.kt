@@ -26,7 +26,10 @@ class CursorOverlayView @JvmOverloads constructor(
         set(value) {
             field = value
             visibility = if (value) VISIBLE else GONE
-            isCursorVisible = true
+            isCursorVisible = value
+            if (!value) {
+                uiHandler.removeCallbacks(autoHideRunnable)
+            }
             invalidate()
         }
 
@@ -35,7 +38,7 @@ class CursorOverlayView @JvmOverloads constructor(
     var cursorY: Float = 320f
         private set
 
-    private var stepSize = 20f
+    private var stepSize = 22f
     private var lastMoveTime = 0L
     private var isCursorVisible = true
 
@@ -90,11 +93,17 @@ class CursorOverlayView @JvmOverloads constructor(
         }
     }
 
+    fun hideCursorImmediately() {
+        isCursorVisible = false
+        uiHandler.removeCallbacks(autoHideRunnable)
+        invalidate()
+    }
+
     private fun wakeUpCursor() {
         isCursorVisible = true
         uiHandler.removeCallbacks(autoHideRunnable)
-        // Video izlerken 5 saniye hareket olmazsa imleci gizle ki görüntüyü kapatmasın
-        uiHandler.postDelayed(autoHideRunnable, 5000L)
+        // 3.5 saniye hareketsiz kalınca imleci gizle ki videoyu kapatmasın
+        uiHandler.postDelayed(autoHideRunnable, 3500L)
         invalidate()
     }
 
@@ -110,48 +119,47 @@ class CursorOverlayView @JvmOverloads constructor(
 
         val now = SystemClock.uptimeMillis()
         stepSize = if (now - lastMoveTime < 190) {
-            min(stepSize + 4.5f, 54f)
+            min(stepSize + 5f, 56f)
         } else {
-            18f
+            20f
         }
         lastMoveTime = now
 
-        val topEdgeThreshold = 36f
-        val bottomEdgeThreshold = (height - 48).coerceAtLeast(100).toFloat()
+        val topEdgeThreshold = 55f
+        val bottomEdgeThreshold = (height - 75).coerceAtLeast(120).toFloat()
 
         when (keyCode) {
             KeyEvent.KEYCODE_DPAD_UP -> {
                 if (cursorY <= topEdgeThreshold) {
-                    // Önce sayfa aşağı kaymışsa yukarı kaydır
-                    if (webView != null && webView.scrollY > 0) {
-                        scrollWebPage(webView, -220)
-                        dispatchHoverAndMouseMove(targetView, webView)
-                        return true
+                    // Sayfa aşağı kaymış durumdaysa önce sayfayı yukarı kaydır, en tepeye gelince üst menüye çık
+                    if (webView != null) {
+                        scrollWebPageAndCheckTop(webView, -280, onReachTopEdge)
                     } else {
-                        // Sayfanın en tepesindeysek ve tekrar yukarı basıldıysa üst menü çubuğuna çık
                         onReachTopEdge()
-                        return true
                     }
+                    dispatchHoverAndMouseMove(targetView, webView)
+                    invalidate()
+                    return true
                 }
-                cursorY = max(8f, cursorY - stepSize)
+                cursorY = max(12f, cursorY - stepSize)
             }
             KeyEvent.KEYCODE_DPAD_DOWN -> {
                 if (cursorY >= bottomEdgeThreshold) {
-                    // Ekranın en altına gelindiğinde sayfayı otomatik aşağı kaydır
+                    // Ekranın alt sınırına gelindiğinde sayfayı her türlü aşağı kaydır!
                     if (webView != null) {
-                        scrollWebPage(webView, 220)
+                        scrollWebPage(targetView ?: webView, webView, 280)
                     } else {
-                        targetView?.scrollBy(0, 220)
+                        targetView?.scrollBy(0, 280)
                     }
                 } else {
-                    cursorY = min((height - 12).toFloat(), cursorY + stepSize)
+                    cursorY = min((height - 16).toFloat(), cursorY + stepSize)
                 }
             }
             KeyEvent.KEYCODE_DPAD_LEFT -> {
-                cursorX = max(8f, cursorX - stepSize)
+                cursorX = max(12f, cursorX - stepSize)
             }
             KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                cursorX = min((width - 12).toFloat(), cursorX + stepSize)
+                cursorX = min((width - 16).toFloat(), cursorX + stepSize)
             }
             else -> return false
         }
@@ -162,21 +170,108 @@ class CursorOverlayView @JvmOverloads constructor(
         return true
     }
 
-    private fun scrollWebPage(webView: WebView, deltaY: Int) {
-        // Hem native WebView kaydırması hem de JS window.scrollBy (modern siteler ve iç container'lar için)
-        val newScrollY = (webView.scrollY + deltaY).coerceAtLeast(0)
-        webView.scrollTo(webView.scrollX, newScrollY)
+    /**
+     * Tüm web sitelerinde (hem klasik body scroll hem de iç div/overflow-y:auto kullanan modern sitelerde)
+     * %100 çalışan çok katmanlı aşağı/yukarı kaydırma motoru.
+     */
+    private fun scrollWebPage(targetView: View, webView: WebView, deltaY: Int) {
+        // 1. Native Android Mouse Wheel (Tekerlek) sinyali gönder (Chrome WebView içindeki tüm kaydırılabilir alanları tetikler)
+        val now = SystemClock.uptimeMillis()
+        val pointerProps = arrayOf(MotionEvent.PointerProperties().apply {
+            id = 0
+            toolType = MotionEvent.TOOL_TYPE_MOUSE
+        })
+        val pointerCoords = arrayOf(MotionEvent.PointerCoords().apply {
+            x = cursorX
+            y = cursorY
+            setAxisValue(MotionEvent.AXIS_VSCROLL, if (deltaY > 0) -1.8f else 1.8f)
+        })
+        val scrollEvent = MotionEvent.obtain(
+            now, now,
+            MotionEvent.ACTION_SCROLL,
+            1, pointerProps, pointerCoords,
+            0, 0, 1f, 1f, 0, 0,
+            InputDevice.SOURCE_MOUSE, 0
+        )
+        targetView.dispatchGenericMotionEvent(scrollEvent)
+        scrollEvent.recycle()
+
+        // 2. Native WebView pageDown / scrollBy
+        if (deltaY > 0) {
+            webView.scrollBy(0, deltaY / 2)
+        } else {
+            val nextY = (webView.scrollY + deltaY / 2).coerceAtLeast(0)
+            webView.scrollTo(webView.scrollX, nextY)
+        }
+
+        // 3. JavaScript ile imlecin altındaki kaydırılabilir kapsayıcıyı (container) veya ana pencereyi kaydır
+        val normX = if (width > 0) (cursorX / width.toFloat()).coerceIn(0f, 1f) else 0.5f
+        val normY = if (height > 0) (cursorY / height.toFloat()).coerceIn(0f, 1f) else 0.5f
         webView.evaluateJavascript(
             """
             (function() {
-                window.scrollBy({ top: $deltaY, left: 0, behavior: 'auto' });
-                if (document.scrollingElement) {
-                    document.scrollingElement.scrollTop += $deltaY;
-                }
+                try {
+                    var dy = $deltaY;
+                    window.scrollBy(0, dy);
+                    if (document.scrollingElement) {
+                        document.scrollingElement.scrollTop += dy;
+                    }
+                    document.documentElement.scrollTop += dy;
+                    if (document.body) {
+                        document.body.scrollTop += dy;
+                    }
+                    var x = Math.floor(window.innerWidth * $normX);
+                    var y = Math.floor(window.innerHeight * $normY);
+                    var el = document.elementFromPoint(x, y);
+                    while (el && el !== document.body && el !== document.documentElement) {
+                        var style = window.getComputedStyle(el);
+                        var overflowY = style ? style.overflowY : '';
+                        if ((overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') && el.scrollHeight > el.clientHeight) {
+                            el.scrollTop += dy;
+                            break;
+                        }
+                        el = el.parentElement;
+                    }
+                } catch(e) {}
             })();
             """.trimIndent(),
             null
         )
+    }
+
+    private fun scrollWebPageAndCheckTop(webView: WebView, deltaY: Int, onReachTopEdge: () -> Unit) {
+        val normX = if (width > 0) (cursorX / width.toFloat()).coerceIn(0f, 1f) else 0.5f
+        val normY = if (height > 0) (cursorY / height.toFloat()).coerceIn(0f, 1f) else 0.5f
+
+        webView.evaluateJavascript(
+            """
+            (function() {
+                try {
+                    var currentTop = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+                    var x = Math.floor(window.innerWidth * $normX);
+                    var y = Math.floor(window.innerHeight * $normY);
+                    var el = document.elementFromPoint(x, y);
+                    while (el && el !== document.body && el !== document.documentElement) {
+                        var style = window.getComputedStyle(el);
+                        var overflowY = style ? style.overflowY : '';
+                        if ((overflowY === 'auto' || overflowY === 'scroll') && el.scrollTop > 0) {
+                            currentTop = Math.max(currentTop, el.scrollTop);
+                            break;
+                        }
+                        el = el.parentElement;
+                    }
+                    return currentTop;
+                } catch(e) { return 0; }
+            })();
+            """.trimIndent()
+        ) { result ->
+            val topVal = result?.trim()?.toDoubleOrNull()?.toInt() ?: 0
+            if (topVal > 5 || webView.scrollY > 5) {
+                scrollWebPage(webView, webView, deltaY)
+            } else {
+                onReachTopEdge()
+            }
+        }
     }
 
     private fun dispatchHoverAndMouseMove(targetView: View?, webView: WebView?) {

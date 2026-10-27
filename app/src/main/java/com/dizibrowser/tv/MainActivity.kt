@@ -10,6 +10,8 @@ import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -52,6 +54,7 @@ class MainActivity : Activity() {
     private lateinit var host: FrameLayout
     private lateinit var fullscreenContainer: FrameLayout
     private lateinit var cursorOverlay: CursorOverlayView
+    private lateinit var floatingCursorHint: TextView
     private lateinit var addressBar: EditText
     private lateinit var statusBar: TextView
     private lateinit var blockedCounterText: TextView
@@ -69,6 +72,13 @@ class MainActivity : Activity() {
 
     private var lastRecordedUrl = ""
     private var lastRecordAt = 0L
+
+    // OK tuşuna basılı tutarak imleci her an (video tam ekranda bile) açıp kapatma
+    private var okLongPressConsumed = false
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val hideHintRunnable = Runnable {
+        floatingCursorHint.visibility = View.GONE
+    }
 
     private enum class ScreenState {
         HOME, WEB, HISTORY
@@ -88,6 +98,7 @@ class MainActivity : Activity() {
         host = findViewById(R.id.contentHost)
         fullscreenContainer = findViewById(R.id.fullscreenContainer)
         cursorOverlay = findViewById(R.id.cursorOverlay)
+        floatingCursorHint = findViewById(R.id.floatingCursorHint)
         addressBar = findViewById(R.id.addressBar)
         statusBar = findViewById(R.id.statusBar)
         blockedCounterText = findViewById(R.id.blockedCounterText)
@@ -101,7 +112,7 @@ class MainActivity : Activity() {
         // Arka planda güncel reklam ve zararlı alan adı listesini çek
         AdBlocker.updateRemoteFilterList(this) { totalRules ->
             runOnUiThread {
-                statusBar.text = "🛡️ Kalkan Aktif ($totalRules filtre) • İmleçle videonun üstüne gelince kontroller açılır"
+                statusBar.text = "🛡️ Kalkan Aktif ($totalRules filtre) • OK Basılı Tut: İmleç Aç/Kapat"
             }
         }
 
@@ -210,7 +221,7 @@ class MainActivity : Activity() {
             override fun onPageFinished(view: WebView, url: String) {
                 addressBar.setText(url)
                 updateFavoriteButtonState(url)
-                statusBar.text = "🛡️ Kalkan Aktif • OK: Tıkla • İmleci en alta indirince sayfa kayar"
+                statusBar.text = "🛡️ Kalkan Aktif • OK Basılı Tut: İmleci Aç/Kapat • En alta inince sayfa kayar"
                 injectPageEnhancements()
                 super.onPageFinished(view, url)
             }
@@ -258,8 +269,10 @@ class MainActivity : Activity() {
                 if (view != null) {
                     fullscreenContainer.addView(view, FrameLayout.LayoutParams(-1, -1))
                 }
-                // Tam ekranda da imleç en üst katmanda aktif kalsın
+                // Tam ekrana geçince imleci ekrandan hemen gizle ve bilgi notunu 4 saniye göster
                 cursorOverlay.bringToFront()
+                cursorOverlay.hideCursorImmediately()
+                showFloatingCursorBanner("🎬 Tam Ekran • İmleci Açmak/Kapatmak için OK tuşuna basılı tutun")
             }
 
             override fun onHideCustomView() {
@@ -287,6 +300,14 @@ class MainActivity : Activity() {
 
             override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean = true
         }
+    }
+
+    private fun showFloatingCursorBanner(msg: String) {
+        floatingCursorHint.text = msg
+        floatingCursorHint.visibility = View.VISIBLE
+        floatingCursorHint.bringToFront()
+        uiHandler.removeCallbacks(hideHintRunnable)
+        uiHandler.postDelayed(hideHintRunnable, 4000L)
     }
 
     private fun setupTopBarButtons() {
@@ -336,11 +357,13 @@ class MainActivity : Activity() {
                 cursorOverlay.visibility = View.VISIBLE
                 cursorOverlay.centerCursor()
                 cursorOverlay.bringToFront()
-                statusBar.text = "🖱️ İmleç Açık: Yön tuşlarıyla hareket ettirin, OK ile tıklayın (En alta inince sayfa kayar)"
+                statusBar.text = "🖱️ İmleç Açık (Kapatmak için OK tuşuna basılı tutun)"
+                showFloatingCursorBanner("🖱️ İmleç Açıldı (Kapatmak için OK tuşuna basılı tutun)")
             } else {
                 cursorOverlay.visibility = View.GONE
                 web.requestFocus()
-                statusBar.text = "⌨️ Standart Kumanda Modu: Yön tuşlarıyla kutular arasında gezinin"
+                statusBar.text = "⌨️ İmleç Kapalı: Yön tuşları videoyu sarar / sayfada gezinir (Açmak için OK basılı tutun)"
+                showFloatingCursorBanner("🚫 İmleç Kapatıldı (Tekrar açmak için OK basılı tutun)")
             }
         }
     }
@@ -477,6 +500,7 @@ class MainActivity : Activity() {
         // Sayfa açılır açılmaz odağı üst çubuktan alıp imlece ver!
         cursorOverlay.centerCursor()
         activateWebCursorNow()
+        showFloatingCursorBanner("🖱️ İmleci Açmak/Kapatmak için OK tuşuna 1 sn basılı tutabilirsiniz")
         web.loadUrl(raw)
     }
 
@@ -484,6 +508,7 @@ class MainActivity : Activity() {
         currentScreen = ScreenState.HOME
         // Ana ekranda kumandayla butonlar arasında standart geçiş yapılabilmesi için imleci gizle
         cursorOverlay.visibility = View.GONE
+        floatingCursorHint.visibility = View.GONE
         host.removeAllViews()
         (web.parent as? ViewGroup)?.removeView(web)
 
@@ -672,6 +697,7 @@ class MainActivity : Activity() {
     private fun showHistory() {
         currentScreen = ScreenState.HISTORY
         cursorOverlay.visibility = View.GONE
+        floatingCursorHint.visibility = View.GONE
         host.removeAllViews()
         (web.parent as? ViewGroup)?.removeView(web)
 
@@ -781,10 +807,12 @@ class MainActivity : Activity() {
                 var playedSeconds = 0;
                 var resumeTarget = $savedResumeSec;
                 var resumeApplied = false;
+                var wasPlaying = false;
 
                 setInterval(function() {
                     try {
                         var videos = document.querySelectorAll('video');
+                        var anyPlaying = false;
                         for (var i = 0; i < videos.length; i++) {
                             var v = videos[i];
                             if (!resumeApplied && resumeTarget > 15 && v.readyState >= 1 && v.currentTime < 5) {
@@ -792,6 +820,7 @@ class MainActivity : Activity() {
                                 resumeApplied = true;
                             }
                             if (!v.paused && !v.ended && v.currentTime > 0) {
+                                anyPlaying = true;
                                 playedSeconds++;
                                 if (!recorded && playedSeconds >= 10) {
                                     recorded = true;
@@ -800,6 +829,12 @@ class MainActivity : Activity() {
                                     DiziBridge.videoProgress(location.href, Math.floor(v.currentTime * 1000));
                                 }
                             }
+                        }
+                        if (anyPlaying && !wasPlaying) {
+                            wasPlaying = true;
+                            DiziBridge.onVideoStartedPlaying();
+                        } else if (!anyPlaying) {
+                            wasPlaying = false;
                         }
                     } catch (e) {}
                 }, 1000);
@@ -830,11 +865,46 @@ class MainActivity : Activity() {
                 }
             }
         }
+
+        @JavascriptInterface
+        fun onVideoStartedPlaying() {
+            runOnUiThread {
+                // Video oynamaya başladığında imleci hemen gizle ki görüntünün ortasında kalmasın
+                cursorOverlay.hideCursorImmediately()
+            }
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val isOkKey = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER
+
+        // Web ekranındayken (veya tam ekran videodayken) OK tuşuna 1 saniye basılı tutunca imleci Aç/Kapat!
+        if (currentScreen == ScreenState.WEB && !topBar.hasFocus() && isOkKey) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                if (event.repeatCount == 0) {
+                    okLongPressConsumed = false
+                } else if (event.repeatCount >= 3 && !okLongPressConsumed) {
+                    okLongPressConsumed = true
+                    toggleCursorMode()
+                    return true
+                }
+                if (cursorOverlay.isCursorEnabled) {
+                    return true
+                }
+            } else if (event.action == KeyEvent.ACTION_UP) {
+                if (okLongPressConsumed) {
+                    okLongPressConsumed = false
+                    return true
+                }
+                if (cursorOverlay.isCursorEnabled) {
+                    val activeTarget = customFullscreenView ?: web
+                    cursorOverlay.performClickOnTarget(activeTarget, web)
+                    return true
+                }
+            }
+        }
+
         if (event.action == KeyEvent.ACTION_DOWN) {
-            // Kumanda medya tuşları her modda videoyu kontrol etsin
             if (currentScreen == ScreenState.WEB) {
                 when (event.keyCode) {
                     KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
@@ -858,7 +928,11 @@ class MainActivity : Activity() {
                         )
                         return true
                     }
-                    KeyEvent.KEYCODE_MENU -> {
+                    // Kumandadaki Menü, Sarı/Mavi renkli tuşlar veya Kanal tuşlarıyla da imleç açılıp kapatılabilir
+                    KeyEvent.KEYCODE_MENU,
+                    KeyEvent.KEYCODE_PROG_YELLOW,
+                    KeyEvent.KEYCODE_PROG_BLUE,
+                    KeyEvent.KEYCODE_INFO -> {
                         toggleCursorMode()
                         return true
                     }
@@ -897,10 +971,6 @@ class MainActivity : Activity() {
                                 }
                             }
                         )
-                        return true
-                    }
-                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                        cursorOverlay.performClickOnTarget(activeTarget, web)
                         return true
                     }
                 }

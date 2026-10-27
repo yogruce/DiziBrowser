@@ -124,6 +124,22 @@
             android:elevation="24dp"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
+
+        <!-- Tam Ekran veya Video Sırasında Görünebilen Hızlı İmleç Kapatma/Açma Rozeti -->
+        <TextView
+            android:id="@+id/floatingCursorHint"
+            android:text="🖱️ İmleci Kapatmak/Açmak için: OK tuşuna basılı tutun (1 sn)"
+            android:textColor="#E6FFFFFF"
+            android:textSize="11sp"
+            android:background="#AA161B22"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="6dp"
+            android:layout_gravity="top|end"
+            android:layout_margin="12dp"
+            android:elevation="26dp"
+            android:visibility="gone"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
     </FrameLayout>
 
     <!-- Alt Bilgi ve Güvenlik Durum Çubuğu -->
@@ -138,7 +154,7 @@
 
         <TextView
             android:id="@+id/statusBar"
-            android:text="🛡️ Kalkan Aktif • İmleçle videonun üstüne gelince kontroller açılır"
+            android:text="🛡️ Kalkan Aktif • OK Basılı Tut: İmleç Aç/Kapat • En alta inince sayfa kayar"
             android:textColor="#8B949E"
             android:textSize="11sp"
             android:singleLine="true"

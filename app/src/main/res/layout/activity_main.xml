@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
+    android:orientation="vertical"
+    android:background="#0D1117"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- Üst Araç Çubuğu (Kumanda Dostu) -->
+    <LinearLayout
+        android:id="@+id/topBar"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="6dp"
+        android:background="#161B22"
+        android:layout_width="match_parent"
+        android:layout_height="54dp">
+
+        <Button
+            android:id="@+id/homeButton"
+            android:text="🏠 Ana Ekran"
+            android:textSize="12sp"
+            android:textColor="#FFFFFF"
+            android:background="@drawable/tv_button_bg"
+            android:paddingHorizontal="10dp"
+            android:layout_marginEnd="4dp"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp" />
+
+        <EditText
+            android:id="@+id/addressBar"
+            android:singleLine="true"
+            android:inputType="textUri"
+            android:imeOptions="actionGo"
+            android:hint="Site adresi veya dizi adı yazın..."
+            android:textColor="#FFFFFF"
+            android:textColorHint="#8B949E"
+            android:textSize="13sp"
+            android:paddingHorizontal="12dp"
+            android:background="@drawable/tv_button_bg"
+            android:layout_marginEnd="4dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="40dp" />
+
+        <Button
+            android:id="@+id/goButton"
+            android:text="Git"
+            android:textSize="12sp"
+            android:textColor="#FFFFFF"
+            android:background="@drawable/tv_button_bg"
+            android:paddingHorizontal="12dp"
+            android:layout_marginEnd="4dp"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp" />
+
+        <Button
+            android:id="@+id/cursorButton"
+            android:text="🖱️ İmleç: Açık"
+            android:textSize="12sp"
+            android:textColor="#00E5FF"
+            android:background="@drawable/tv_button_bg"
+            android:paddingHorizontal="12dp"
+            android:layout_marginEnd="4dp"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp" />
+
+        <Button
+            android:id="@+id/favButton"
+            android:text="⭐ Favori"
+            android:textSize="12sp"
+            android:textColor="#FFD700"
+            android:background="@drawable/tv_button_bg"
+            android:paddingHorizontal="10dp"
+            android:layout_marginEnd="4dp"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp" />
+
+        <Button
+            android:id="@+id/historyButton"
+            android:text="🕘 Geçmiş"
+            android:textSize="12sp"
+            android:textColor="#FFFFFF"
+            android:background="@drawable/tv_button_bg"
+            android:paddingHorizontal="10dp"
+            android:layout_marginEnd="4dp"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp" />
+
+        <Button
+            android:id="@+id/qrButton"
+            android:text="📱 Telefondan"
+            android:textSize="12sp"
+            android:textColor="#FFFFFF"
+            android:background="@drawable/tv_button_bg"
+            android:paddingHorizontal="10dp"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp" />
+    </LinearLayout>
+
+    <!-- Ana İçerik ve Sanal İmleç Katmanı -->
+    <FrameLayout
+        android:id="@+id/mainStack"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <FrameLayout
+            android:id="@+id/contentHost"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <!-- HTML5 Tam Ekran Video Konteyneri -->
+        <FrameLayout
+            android:id="@+id/fullscreenContainer"
+            android:visibility="gone"
+            android:background="#000000"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <!-- D-Pad Sanal Fare İmleci Katmanı (Her zaman en üstte) -->
+        <com.dizibrowser.tv.CursorOverlayView
+            android:id="@+id/cursorOverlay"
+            android:elevation="24dp"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+    </FrameLayout>
+
+    <!-- Alt Bilgi ve Güvenlik Durum Çubuğu -->
+    <LinearLayout
+        android:id="@+id/bottomBar"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="12dp"
+        android:background="#161B22"
+        android:layout_width="match_parent"
+        android:layout_height="28dp">
+
+        <TextView
+            android:id="@+id/statusBar"
+            android:text="🛡️ Kalkan Aktif • İmleçle videonun üstüne gelince kontroller açılır"
+            android:textColor="#8B949E"
+            android:textSize="11sp"
+            android:singleLine="true"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/blockedCounterText"
+            android:text="🚫 Engellenen: 0"
+            android:textColor="#FF7B72"
+            android:textSize="11sp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+</LinearLayout>

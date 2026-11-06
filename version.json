@@ -1,6 +1,6 @@
 {
-  "versionCode": 8,
-  "versionName": "1.5.0",
+  "versionCode": 9,
+  "versionName": "1.6.0",
   "apkUrl": "https://raw.githubusercontent.com/yogruce/DiziBrowser/main/DiziBrowser-TV-v1.0.apk",
-  "changelog": "• Netflix tarzı Sonraki Bölüm kartı eklendi: Tam ekranda bile OK tuşuna basınca sağ altta çıkar, bölüm sonuna 15 sn kala geri sayımla otomatik sonraki bölüme geçer.\n• GitHub üzerinden tek tuşla Otomatik APK Güncelleme eklendi."
+  "changelog": "• Tam Otomatik Dizi Maratonu (v1.6.0): İlk bölümde sadece 1 kez Play'e basmanız yeterli! Video başlayınca otomatik Tam Ekran olur, bölüm bitimine 15 sn kala Netflix sayacıyla sonraki bölüme geçer, yeni bölümde otomatik Play'e basar ve yeniden Tam Ekran yapar (Cross-Origin iframe oynatıcılar dahil)."
 }

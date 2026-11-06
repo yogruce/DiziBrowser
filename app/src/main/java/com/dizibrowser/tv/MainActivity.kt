@@ -13,11 +13,15 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
@@ -93,11 +97,17 @@ class MainActivity : Activity() {
     private var lastRecordedUrl = ""
     private var lastRecordAt = 0L
 
-    // Otomatik Sonraki Bölüm ve Netflix Geri Sayım Durumu
+    // Otomatik Sonraki Bölüm, Otomatik Oynatma ve Otomatik Tam Ekran Durumu
     private var isAutoNextEnabled = true
     private var detectedNextEpisodeUrl: String = ""
     private var detectedNextEpisodeLabel: String = ""
     private var shouldAutoStartVideoAfterNextTransition = false
+    private var autoNextTransitionActiveUntilMs = 0L
+    private var autoNextPlayCompleted = false
+    private var hasAutoFullscreenedCurrentPage = false
+    private var playerCenterRatioX = 0.50f
+    private var playerCenterRatioY = 0.45f
+    private var autoPlayTapCount = 0
     private var isNetflixCountdownRunning = false
     private var isNetflixCountdownCancelledForCurrentPage = false
     private var netflixCountdownSeconds = 10
@@ -111,6 +121,36 @@ class MainActivity : Activity() {
     private val hideNetflixPeekRunnable = Runnable {
         if (!isNetflixCountdownRunning) {
             netflixNextCard.visibility = View.GONE
+        }
+    }
+    private val autoPlayTapAssistRunnable = object : Runnable {
+        override fun run() {
+            val now = System.currentTimeMillis()
+            if (currentScreen != ScreenState.WEB || now > autoNextTransitionActiveUntilMs || autoNextPlayCompleted || customFullscreenView != null) {
+                return
+            }
+            if (autoPlayTapCount >= 6) return
+            autoPlayTapCount++
+
+            // Önce ana sayfadaki oynatıcıyı merkeze hizala ve varsa kapak/poster katmanına tıkla
+            web.evaluateJavascript(
+                "if (window.__diziPrepareAndClickMainPlayer) window.__diziPrepareAndClickMainPlayer();",
+                null
+            )
+
+            // Ardından oynatıcının tam merkezine gerçek donanımsal Android dokunuşu gönder (Cross-Origin iframe oynatıcılarını da uyandırır)
+            uiHandler.postDelayed({
+                if (!autoNextPlayCompleted && customFullscreenView == null && currentScreen == ScreenState.WEB) {
+                    dispatchSyntheticTapOnPlayer()
+                }
+            }, 350L)
+
+            uiHandler.postDelayed(this, 2600L)
+        }
+    }
+    private val autoFullscreenTapRunnable = Runnable {
+        if (currentScreen == ScreenState.WEB && customFullscreenView == null && !hasAutoFullscreenedCurrentPage) {
+            dispatchSyntheticTapOnPlayer()
         }
     }
     private val netflixCountdownTickRunnable = object : Runnable {
@@ -319,6 +359,12 @@ class MainActivity : Activity() {
 
         web.addJavascriptInterface(DiziJsBridge(), "DiziBridge")
 
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            try {
+                WebViewCompat.addDocumentStartJavaScript(web, getUniversalAllFramesScript(), setOf("*"))
+            } catch (_: Exception) {}
+        }
+
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url.toString()
@@ -356,6 +402,9 @@ class MainActivity : Activity() {
                 detectedNextEpisodeUrl = ""
                 detectedNextEpisodeLabel = ""
                 isNetflixCountdownCancelledForCurrentPage = false
+                hasAutoFullscreenedCurrentPage = false
+                playerCenterRatioX = 0.50f
+                playerCenterRatioY = 0.45f
                 stopNetflixCountdown(cancelledByUser = false)
                 updateAutoNextButtonUi()
                 addressBar.setText(url)
@@ -378,6 +427,11 @@ class MainActivity : Activity() {
                 }
 
                 injectPageEnhancements()
+
+                if (System.currentTimeMillis() < autoNextTransitionActiveUntilMs && !autoNextPlayCompleted) {
+                    uiHandler.removeCallbacks(autoPlayTapAssistRunnable)
+                    uiHandler.postDelayed(autoPlayTapAssistRunnable, 1500L)
+                }
                 super.onPageFinished(view, url)
             }
 
@@ -385,6 +439,7 @@ class MainActivity : Activity() {
                 super.doUpdateVisitedHistory(view, url, isReload)
                 if (!isReload && shouldRecordPageInHistory(url)) {
                     isNetflixCountdownCancelledForCurrentPage = false
+                    hasAutoFullscreenedCurrentPage = false
                     val pageTitle = view.title?.trim().orEmpty()
                     recordHistoryAsync(url, pageTitle.ifBlank { url }, -1L)
                 }
@@ -434,6 +489,12 @@ class MainActivity : Activity() {
                 }
                 customFullscreenView = view
                 customViewCallback = callback
+                hasAutoFullscreenedCurrentPage = true
+                autoNextPlayCompleted = true
+                autoNextTransitionActiveUntilMs = 0L
+                uiHandler.removeCallbacks(autoPlayTapAssistRunnable)
+                uiHandler.removeCallbacks(autoFullscreenTapRunnable)
+
                 topBar.visibility = View.GONE
                 bottomBar.visibility = View.GONE
                 fullscreenContainer.visibility = View.VISIBLE
@@ -641,19 +702,51 @@ class MainActivity : Activity() {
                 web.webChromeClient?.onHideCustomView()
             }
             shouldAutoStartVideoAfterNextTransition = true
+            autoNextTransitionActiveUntilMs = System.currentTimeMillis() + 45_000L
+            autoNextPlayCompleted = false
+            hasAutoFullscreenedCurrentPage = false
+            autoPlayTapCount = 0
+            uiHandler.removeCallbacks(autoPlayTapAssistRunnable)
+            uiHandler.removeCallbacks(autoFullscreenTapRunnable)
+
             if (nextUrl.isNotBlank() && isSafeWebUrl(nextUrl)) {
-                showFloatingCursorBanner("⏭️ Sonraki bölüme geçiliyor ve otomatik başlatılıyor...")
+                showFloatingCursorBanner("⏭️ Sonraki bölüme geçiliyor • Otomatik başlatılıp tam ekran yapılacak...")
                 statusBar.text = "⏭️ Sonraki bölüm açılıyor: $nextUrl"
                 addressBar.setText(nextUrl)
                 web.loadUrl(nextUrl)
             } else {
-                showFloatingCursorBanner("⏭️ Sonraki bölüm butonuna tıklanıyor...")
+                showFloatingCursorBanner("⏭️ Sonraki bölüme geçiliyor • Otomatik başlatılıp tam ekran yapılacak...")
                 web.evaluateJavascript(
                     "if (window.__diziClickNextEpisode) window.__diziClickNextEpisode();",
                     null
                 )
+                uiHandler.postDelayed(autoPlayTapAssistRunnable, 2000L)
             }
         }
+    }
+
+    /**
+     * WebView üzerindeki video oynatıcı kutusunun merkezine gerçek bir donanımsal Android dokunuşu (MotionEvent) gönderir.
+     * Bu sayede:
+     * 1) Cross-Origin <iframe> içindeki oynatıcıların (VidMoly, CloseLoad, JWPlayer vb.) Play butonu tetiklenir.
+     * 2) Chromium'un Tam Ekran (requestFullscreen) için zorunlu tuttuğu 'User Activation' izni otomatik kazanılır!
+     */
+    private fun dispatchSyntheticTapOnPlayer() {
+        if (web.width <= 0 || web.height <= 0 || currentScreen != ScreenState.WEB) return
+        val x = (playerCenterRatioX * web.width).coerceIn(60f, (web.width - 60).toFloat())
+        val y = (playerCenterRatioY * web.height).coerceIn(60f, (web.height - 60).toFloat())
+
+        val downTime = SystemClock.uptimeMillis()
+        val downEvent = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0)
+        web.dispatchTouchEvent(downEvent)
+        downEvent.recycle()
+
+        uiHandler.postDelayed({
+            val upTime = SystemClock.uptimeMillis()
+            val upEvent = MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)
+            web.dispatchTouchEvent(upEvent)
+            upEvent.recycle()
+        }, 45L)
     }
 
     private fun handleTopBackAction() {
@@ -1125,60 +1218,124 @@ class MainActivity : Activity() {
         statusBar.text = "${items.size} bölüm kaydı • Yalnızca cihazda tutulur ve 10 gün sonunda otomatik silinir"
     }
 
-    private fun injectPageEnhancements() {
-        web.evaluateJavascript(AdBlocker.getCosmeticHideJs(), null)
-
-        val focusAndPlayerHelperJs = """
+    /**
+     * Hem ana sayfada (window.top) hem de tüm Cross-Origin video oynatıcı <iframe>'leri (VidMoly, CloseLoad,
+     * Rapidrame, Ok.ru, Sibnet, JWPlayer, Plyr, VideoJS vb.) içinde çalışan evrensel otomasyon betiği.
+     */
+    private fun getUniversalAllFramesScript(): String {
+        return """
             (function() {
-                try {
-                    var focusStyleId = '__dizi_tv_focus_css';
-                    if (!document.getElementById(focusStyleId)) {
-                        var st = document.createElement('style');
-                        st.id = focusStyleId;
-                        st.innerHTML = `
-                            *:focus, *:focus-visible {
-                                outline: 3px solid #00E5FF !important;
-                                outline-offset: 2px !important;
-                                box-shadow: 0 0 12px #00E5FF !important;
-                            }
-                        `;
-                        document.head.appendChild(st);
-                    }
-                } catch(e) {}
-            })();
-        """.trimIndent()
-        web.evaluateJavascript(focusAndPlayerHelperJs, null)
+                if (window.__diziUniversalInstalled) return;
+                window.__diziUniversalInstalled = true;
 
-        if (shouldAutoStartVideoAfterNextTransition) {
-            shouldAutoStartVideoAfterNextTransition = false
-            web.evaluateJavascript(
-                """
-                (function() {
-                    var attempts = 0;
-                    var autoPlayTimer = setInterval(function() {
-                        attempts++;
-                        var v = document.querySelector('video');
-                        if (v) {
-                            v.play().catch(function(){});
-                            clearInterval(autoPlayTimer);
-                        } else {
-                            var playBtns = document.querySelectorAll('.jw-icon-display, .vjs-big-play-button, .plyr__control--overlaid, [aria-label*="Play"], [title*="Oynat"]');
-                            if (playBtns.length > 0) {
-                                playBtns[0].click();
-                                clearInterval(autoPlayTimer);
+                // 1) Tüm frame'lerde reklam amaçlı açılan popup pencereleri engelle
+                try {
+                    window.open = function() { return null; };
+                } catch(e) {}
+
+                var isTopFrame = (window === window.top);
+                var activePlayingVideo = null;
+                window.__diziNeedFullscreenGesture = false;
+                window.__diziFullscreenGestureExpireAt = 0;
+
+                // 2) Videoyu veya oynatıcı kapsayıcısını Tam Ekran (HTML5 Fullscreen) yapan yardımcı
+                function enterPlayerFullscreen(v) {
+                    try {
+                        if (document.fullscreenElement || document.webkitFullscreenElement) return true;
+                        var target = (v && v.closest && v.closest('.jwplayer, .video-js, .plyr, .artplayer-app, .dplayer, .clappr-player, .flowplayer, #player, .player'))
+                            || (!isTopFrame ? document.documentElement : v)
+                            || v;
+                        if (target) {
+                            var req = target.requestFullscreen || target.webkitRequestFullscreen || target.mozRequestFullScreen || target.msRequestFullscreen;
+                            if (req) {
+                                var p = req.call(target);
+                                if (p && typeof p.catch === 'function') {
+                                    p.catch(function() {
+                                        tryFallbackFullscreen(v);
+                                    });
+                                }
+                                return true;
                             }
                         }
-                        if (attempts > 8) clearInterval(autoPlayTimer);
-                    }, 1200);
-                })();
-                """.trimIndent(),
-                null
-            )
-        }
+                        return tryFallbackFullscreen(v);
+                    } catch(e) {
+                        return tryFallbackFullscreen(v);
+                    }
+                }
 
-        val savedResumeSec = (history.getResumePosition(web.url ?: "", "") / 1000L)
-        val trackerAndNextEpisodeJs = """
-            (function() {
+                function tryFallbackFullscreen(v) {
+                    try {
+                        if (v) {
+                            var vReq = v.requestFullscreen || v.webkitRequestFullscreen || v.webkitEnterFullscreen;
+                            if (vReq) {
+                                vReq.call(v);
+                                return true;
+                            }
+                        }
+                        var fsBtns = document.querySelectorAll('.jw-icon-fullscreen, .vjs-fullscreen-control, [data-plyr="fullscreen"], .art-icon-fullscreen, .dplayer-full-icon, [aria-label*="Fullscreen" i], [title*="Fullscreen" i], [title*="Tam Ekran" i]');
+                        if (fsBtns.length > 0) {
+                            fsBtns[0].click();
+                            return true;
+                        }
+                    } catch(e) {}
+                    return false;
+                }
+
+                // 3) Capture-Phase (Yakalama Evresi) Dokunuş Dinleyicisi:
+                // Android'in gönderdiği donanımsal dokunuşu oynatıcıya (pause butonuna) ulaşmadan yakalar,
+                // videonun duraklatılmasını engeller ve Chromium UserActivation izniyle Tam Ekranı tetikler!
+                function onCaptureGestureForFullscreen(e) {
+                    try {
+                        if (!window.__diziNeedFullscreenGesture) return;
+                        if (Date.now() > window.__diziFullscreenGestureExpireAt || document.fullscreenElement || document.webkitFullscreenElement) {
+                            window.__diziNeedFullscreenGesture = false;
+                            return;
+                        }
+                        var v = activePlayingVideo || document.querySelector('video');
+                        if (!v) return;
+
+                        if (e.type === 'pointerdown' || e.type === 'touchstart' || e.type === 'mousedown') {
+                            // Oynatıcının dokunuşu görüp videoyu duraklatmasını engelle ama Chromium'un tap jestini tamamlamasına izin ver
+                            e.stopImmediatePropagation();
+                            return;
+                        }
+
+                        if (e.type === 'pointerup' || e.type === 'touchend' || e.type === 'mouseup' || e.type === 'click') {
+                            e.stopImmediatePropagation();
+                            e.preventDefault();
+                            if (v.muted) v.muted = false;
+                            if (v.volume < 0.2) v.volume = 1.0;
+                            if (v.paused) v.play().catch(function(){});
+                            enterPlayerFullscreen(v);
+                            if (e.type === 'click') {
+                                window.__diziNeedFullscreenGesture = false;
+                            }
+                        }
+                    } catch(err) {}
+                }
+
+                ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'mousedown', 'mouseup', 'click'].forEach(function(evtName) {
+                    window.addEventListener(evtName, onCaptureGestureForFullscreen, true);
+                });
+
+                // 4) Tüm <iframe>'lere autoplay ve fullscreen izni tanımla
+                function upgradeAllIframes() {
+                    try {
+                        var iframes = document.querySelectorAll('iframe');
+                        for (var i = 0; i < iframes.length; i++) {
+                            var ifr = iframes[i];
+                            if (!ifr.__diziUpgraded) {
+                                ifr.__diziUpgraded = true;
+                                ifr.allowFullscreen = true;
+                                ifr.setAttribute('allowfullscreen', 'true');
+                                ifr.setAttribute('webkitallowfullscreen', 'true');
+                                ifr.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
+                            }
+                        }
+                    } catch(e) {}
+                }
+
+                // 5) Yalnızca Ana Sayfada (isTopFrame) Sonraki Bölüm ve Oynatıcı Konumu Tespiti
                 function findNextEpisodeElement() {
                     var keywords = [
                         'sonraki bölüm', 'sonraki bolum', 'gelecek bölüm', 'sıradaki bölüm',
@@ -1218,104 +1375,280 @@ class MainActivity : Activity() {
                     return null;
                 }
 
-                window.__diziClickNextEpisode = function() {
-                    var found = findNextEpisodeElement();
-                    if (found && found.el) {
-                        found.el.click();
-                        return true;
+                function findMainPlayerElement() {
+                    var selectors = [
+                        'iframe[src*="embed"]', 'iframe[src*="player"]', 'iframe[src*="vidmoly"]',
+                        'iframe[src*="closeload"]', 'iframe[src*="rapid"]', 'iframe[src*="ok.ru"]',
+                        'iframe[src*="sibnet"]', 'iframe[src*="contentx"]', 'iframe[src*="pichive"]',
+                        'video', '.player-box', '#player', '.video-player', '.player-container',
+                        '.embed-container', '#video-area', '.player', 'iframe'
+                    ];
+                    for (var s = 0; s < selectors.length; s++) {
+                        var els = document.querySelectorAll(selectors[s]);
+                        for (var i = 0; i < els.length; i++) {
+                            var r = els[i].getBoundingClientRect();
+                            if (r.width >= 240 && r.height >= 140) {
+                                return els[i];
+                            }
+                        }
                     }
-                    return false;
-                };
+                    return null;
+                }
+
+                if (isTopFrame) {
+                    window.__diziClickNextEpisode = function() {
+                        var found = findNextEpisodeElement();
+                        if (found && found.el) {
+                            found.el.click();
+                            return true;
+                        }
+                        return false;
+                    };
+
+                    window.__diziPrepareAndClickMainPlayer = function() {
+                        try {
+                            upgradeAllIframes();
+                            // Varsa "Tıkla İzle / Kapak / Play Overlay" butonlarına tıkla
+                            var covers = document.querySelectorAll('.player-poster, .play-overlay, .video-overlay, #player-overlay, .lazy-player, .kapak, #play-video, .video-play, .play-btn, .vjs-big-play-button, .jw-icon-display');
+                            for (var c = 0; c < covers.length; c++) {
+                                covers[c].click();
+                            }
+                            var pEl = findMainPlayerElement();
+                            if (pEl) {
+                                pEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                var r = pEl.getBoundingClientRect();
+                                if (r.width > 100 && r.height > 100 && window.innerWidth > 0 && window.innerHeight > 0) {
+                                    var rx = (r.left + r.width / 2) / window.innerWidth;
+                                    var ry = (r.top + r.height / 2) / window.innerHeight;
+                                    if (window.DiziBridge && DiziBridge.onPlayerRectFound) {
+                                        DiziBridge.onPlayerRectFound(rx, ry);
+                                    }
+                                }
+                            }
+                        } catch(e) {}
+                    };
+                }
 
                 function checkAndReportNextEpisode() {
+                    if (!isTopFrame) return;
                     try {
+                        upgradeAllIframes();
                         var found = findNextEpisodeElement();
                         if (found) {
                             DiziBridge.onNextEpisodeDetected(found.url || '', found.label || 'Sonraki Bölüm');
                         } else {
                             DiziBridge.onNextEpisodeDetected('', '');
                         }
+                        var pEl = findMainPlayerElement();
+                        if (pEl && window.innerWidth > 0 && window.innerHeight > 0) {
+                            var r = pEl.getBoundingClientRect();
+                            if (r.top >= 0 && r.bottom <= window.innerHeight && r.width >= 240 && r.height >= 140) {
+                                DiziBridge.onPlayerRectFound((r.left + r.width / 2) / window.innerWidth, (r.top + r.height / 2) / window.innerHeight);
+                            }
+                        }
                     } catch(e) {}
                 }
 
-                checkAndReportNextEpisode();
-                setTimeout(checkAndReportNextEpisode, 3000);
+                // 6) Otomatik Oynatma Denemesi (Hem ana sayfa hem de Cross-Origin Oynatıcı Iframe içinde çalışır)
+                function tryAutoPlayInCurrentFrame() {
+                    try {
+                        if (!window.DiziBridge || !DiziBridge.isAutoPlayPending || !DiziBridge.isAutoPlayPending()) return;
+                        var videos = document.querySelectorAll('video');
+                        for (var i = 0; i < videos.length; i++) {
+                            var v = videos[i];
+                            if (v.paused) {
+                                v.muted = false;
+                                v.play().catch(function() {
+                                    // Sesli otomatik oynatma jest bekliyorsa önce sessiz başlat, Android dokunuşu gelince sesi aç
+                                    v.muted = true;
+                                    v.play().catch(function(){});
+                                });
+                            }
+                        }
+                        var playBtns = document.querySelectorAll('.jw-icon-display, .jw-display-icon-container, .vjs-big-play-button, .plyr__control--overlaid, .art-state, .dplayer-play-icon, .fp-play, .play-button, .btn-play, [aria-label*="Play" i], [title*="Play" i], [title*="Oynat" i]');
+                        for (var b = 0; b < playBtns.length; b++) {
+                            var btn = playBtns[b];
+                            var br = btn.getBoundingClientRect();
+                            if (br.width > 10 && br.height > 10) {
+                                btn.click();
+                                break;
+                            }
+                        }
+                    } catch(e) {}
+                }
 
-                if (window.__diziTrackerInstalled) return;
-                window.__diziTrackerInstalled = true;
                 var recorded = false;
                 var tickCount = 0;
-                var resumeTarget = $savedResumeSec;
-                var resumeApplied = false;
                 var wasPlaying = false;
                 var countdownRequested = false;
+                var autoFsTriggeredInFrame = false;
 
                 setInterval(function() {
                     try {
-                        checkAndReportNextEpisode();
+                        if (isTopFrame) {
+                            checkAndReportNextEpisode();
+                        }
+                        tryAutoPlayInCurrentFrame();
+
                         var videos = document.querySelectorAll('video');
                         var anyPlaying = false;
                         for (var i = 0; i < videos.length; i++) {
                             var v = videos[i];
+                            var vr = v.getBoundingClientRect();
+                            if (vr.width < 160 && vr.height < 100 && !document.fullscreenElement && !document.webkitFullscreenElement) {
+                                continue;
+                            }
+
                             if (!v.__diziEndedBound) {
                                 v.__diziEndedBound = true;
                                 v.addEventListener('ended', function() {
-                                    if (!countdownRequested && v.duration > 120) {
+                                    if (!countdownRequested && (v.duration > 120 || isNaN(v.duration))) {
                                         countdownRequested = true;
                                         DiziBridge.onStartNetflixCountdown(5);
                                     }
                                 });
                             }
-                            if (!resumeApplied && resumeTarget > 15 && v.readyState >= 1 && v.currentTime < 5) {
-                                v.currentTime = resumeTarget;
-                                resumeApplied = true;
-                            }
-                            if (!v.paused && !v.ended && v.currentTime > 0) {
+
+                            if (!v.paused && !v.ended && v.currentTime > 0.25 && v.readyState >= 2) {
                                 anyPlaying = true;
+                                activePlayingVideo = v;
                                 tickCount++;
+
                                 if (!recorded && tickCount >= 2) {
                                     recorded = true;
-                                    DiziBridge.videoPlayed(document.title || location.hostname, location.href, Math.floor(v.currentTime * 1000));
-                                } else if (tickCount % 6 === 0) {
+                                    DiziBridge.videoPlayed(document.title || '', location.href, Math.floor(v.currentTime * 1000));
+                                } else if (tickCount % 5 === 0) {
                                     DiziBridge.videoProgress(location.href, Math.floor(v.currentTime * 1000));
                                 }
+
+                                // Video oynamaya başladığında (İlk bölümde Play'e basınca veya Sonraki Bölüme geçince) otomatik Tam Ekran yap!
+                                if (!autoFsTriggeredInFrame && !document.fullscreenElement && !document.webkitFullscreenElement) {
+                                    if (window.DiziBridge && DiziBridge.shouldAutoFullscreenNow && DiziBridge.shouldAutoFullscreenNow()) {
+                                        autoFsTriggeredInFrame = true;
+                                        window.__diziNeedFullscreenGesture = true;
+                                        window.__diziFullscreenGestureExpireAt = Date.now() + 5500;
+                                        enterPlayerFullscreen(v);
+                                        DiziBridge.requestFullscreenTap();
+                                    }
+                                }
+
                                 // Bölümün bitmesine 15 saniye veya daha az kaldıysa Netflix geri sayım kartını ekrana çıkar!
-                                if (!countdownRequested && v.duration > 240 && (v.duration - v.currentTime) <= 15) {
+                                if (!countdownRequested && v.duration > 180 && (v.duration - v.currentTime) <= 15) {
                                     countdownRequested = true;
                                     var rem = Math.max(4, Math.floor(v.duration - v.currentTime));
                                     DiziBridge.onStartNetflixCountdown(rem);
                                 }
                             }
                         }
+
                         if (anyPlaying && !wasPlaying) {
                             wasPlaying = true;
                             DiziBridge.onVideoStartedPlaying();
                         } else if (!anyPlaying) {
                             wasPlaying = false;
                         }
-                    } catch (e) {}
-                }, 4000);
+                    } catch(e) {}
+                }, 2200);
+
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', function() {
+                        if (isTopFrame) checkAndReportNextEpisode();
+                        tryAutoPlayInCurrentFrame();
+                    });
+                } else {
+                    if (isTopFrame) checkAndReportNextEpisode();
+                    tryAutoPlayInCurrentFrame();
+                }
             })();
         """.trimIndent()
-        web.evaluateJavascript(trackerAndNextEpisodeJs, null)
+    }
+
+    private fun injectPageEnhancements() {
+        web.evaluateJavascript(AdBlocker.getCosmeticHideJs(), null)
+
+        val focusAndPlayerHelperJs = """
+            (function() {
+                try {
+                    var focusStyleId = '__dizi_tv_focus_css';
+                    if (!document.getElementById(focusStyleId)) {
+                        var st = document.createElement('style');
+                        st.id = focusStyleId;
+                        st.innerHTML = `
+                            *:focus, *:focus-visible {
+                                outline: 3px solid #00E5FF !important;
+                                outline-offset: 2px !important;
+                                box-shadow: 0 0 12px #00E5FF !important;
+                            }
+                        `;
+                        document.head.appendChild(st);
+                    }
+                } catch(e) {}
+            })();
+        """.trimIndent()
+        web.evaluateJavascript(focusAndPlayerHelperJs, null)
+
+        // DOCUMENT_START_SCRIPT desteklemeyen eski WebView sürümleri için ana sayfaya da enjekte et
+        web.evaluateJavascript(getUniversalAllFramesScript(), null)
     }
 
     inner class DiziJsBridge {
         @JavascriptInterface
+        fun isAutoPlayPending(): Boolean {
+            return System.currentTimeMillis() < autoNextTransitionActiveUntilMs && !autoNextPlayCompleted
+        }
+
+        @JavascriptInterface
+        fun shouldAutoFullscreenNow(): Boolean {
+            if (!isAutoNextEnabled || hasAutoFullscreenedCurrentPage || customFullscreenView != null) {
+                return false
+            }
+            val inAutoNextWindow = System.currentTimeMillis() < autoNextTransitionActiveUntilMs
+            return inAutoNextWindow || hasDetectedNextEpisode()
+        }
+
+        @JavascriptInterface
+        fun onPlayerRectFound(ratioX: Float, ratioY: Float) {
+            if (ratioX in 0.10f..0.90f && ratioY in 0.10f..0.90f) {
+                playerCenterRatioX = ratioX
+                playerCenterRatioY = ratioY
+            }
+        }
+
+        @JavascriptInterface
+        fun requestFullscreenTap() {
+            runOnUiThread {
+                if (customFullscreenView == null && !hasAutoFullscreenedCurrentPage) {
+                    uiHandler.removeCallbacks(autoFullscreenTapRunnable)
+                    uiHandler.postDelayed(autoFullscreenTapRunnable, 350L)
+                    uiHandler.postDelayed(autoFullscreenTapRunnable, 1600L)
+                }
+            }
+        }
+
+        @JavascriptInterface
         fun videoPlayed(title: String, url: String, positionMs: Long) {
-            val now = System.currentTimeMillis()
-            if (isSafeWebUrl(url) && (url != lastRecordedUrl || now - lastRecordAt > 30_000L)) {
-                lastRecordedUrl = url
-                lastRecordAt = now
-                recordHistoryAsync(url, title, positionMs)
+            runOnUiThread {
+                val mainUrl = web.url?.takeIf { isSafeWebUrl(it) } ?: url
+                val mainTitle = web.title?.trim()?.takeIf { it.isNotBlank() } ?: title.ifBlank { mainUrl }
+                val now = System.currentTimeMillis()
+                if (isSafeWebUrl(mainUrl) && (mainUrl != lastRecordedUrl || now - lastRecordAt > 30_000L)) {
+                    lastRecordedUrl = mainUrl
+                    lastRecordAt = now
+                    recordHistoryAsync(mainUrl, mainTitle, positionMs)
+                }
             }
         }
 
         @JavascriptInterface
         fun videoProgress(url: String, positionMs: Long) {
-            if (isSafeWebUrl(url) && positionMs > 5000L) {
-                historyIoExecutor.execute {
-                    history.updatePositionByUrlOrStream(url, "", positionMs)
+            if (positionMs > 5000L) {
+                runOnUiThread {
+                    val mainUrl = web.url?.takeIf { isSafeWebUrl(it) } ?: url
+                    if (isSafeWebUrl(mainUrl)) {
+                        historyIoExecutor.execute {
+                            history.updatePositionByUrlOrStream(mainUrl, "", positionMs)
+                        }
+                    }
                 }
             }
         }
@@ -1323,6 +1656,8 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun onVideoStartedPlaying() {
             runOnUiThread {
+                autoNextPlayCompleted = true
+                uiHandler.removeCallbacks(autoPlayTapAssistRunnable)
                 cursorOverlay.hideCursorImmediately()
             }
         }

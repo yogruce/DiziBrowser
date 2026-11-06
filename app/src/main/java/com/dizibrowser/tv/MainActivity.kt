@@ -129,23 +129,24 @@ class MainActivity : Activity() {
             if (currentScreen != ScreenState.WEB || now > autoNextTransitionActiveUntilMs || autoNextPlayCompleted || customFullscreenView != null) {
                 return
             }
-            if (autoPlayTapCount >= 6) return
+            // En fazla 2 nazik deneme yap, kullanıcıya her zaman müdahale alanı bırak
+            if (autoPlayTapCount >= 2) return
             autoPlayTapCount++
 
-            // Önce ana sayfadaki oynatıcıyı merkeze hizala ve varsa kapak/poster katmanına tıkla
             web.evaluateJavascript(
-                "if (window.__diziPrepareAndClickMainPlayer) window.__diziPrepareAndClickMainPlayer();",
+                "if (window.__diziUpdatePlayerCoordinatesOnly) window.__diziUpdatePlayerCoordinatesOnly();",
                 null
             )
 
-            // Ardından oynatıcının tam merkezine gerçek donanımsal Android dokunuşu gönder (Cross-Origin iframe oynatıcılarını da uyandırır)
             uiHandler.postDelayed({
-                if (!autoNextPlayCompleted && customFullscreenView == null && currentScreen == ScreenState.WEB) {
+                if (!autoNextPlayCompleted && customFullscreenView == null && currentScreen == ScreenState.WEB && System.currentTimeMillis() < autoNextTransitionActiveUntilMs) {
                     dispatchSyntheticTapOnPlayer()
                 }
-            }, 350L)
+            }, 300L)
 
-            uiHandler.postDelayed(this, 2600L)
+            if (autoPlayTapCount < 2) {
+                uiHandler.postDelayed(this, 3200L)
+            }
         }
     }
     private val autoFullscreenTapRunnable = Runnable {
@@ -164,7 +165,7 @@ class MainActivity : Activity() {
             }
             val label = detectedNextEpisodeLabel.ifBlank { "Sonraki Bölüm" }
             netflixNextTitle.text = "⏭️ SIRADAKİ: ${label.uppercase(Locale.getDefault())}"
-            netflixNextSubtitle.text = "Sonraki bölüm $netflixCountdownSeconds saniye içinde başlıyor... (OK ile hemen geç)"
+            netflixNextSubtitle.text = "Bölüm bitiyor • $netflixCountdownSeconds sn sonra geçilecek (İptal için Geri tuşu)"
             netflixPlayNextBtn.text = "▶ Şimdi Geç ($netflixCountdownSeconds)"
             netflixCountdownSeconds--
             uiHandler.postDelayed(this, 1000L)
@@ -262,14 +263,16 @@ class MainActivity : Activity() {
         if (isNetflixCountdownRunning) return
 
         isNetflixCountdownRunning = true
-        netflixCountdownSeconds = initialSeconds.coerceIn(3, 15)
+        netflixCountdownSeconds = initialSeconds.coerceIn(8, 15)
         uiHandler.removeCallbacks(hideNetflixPeekRunnable)
 
-        netflixCancelNextBtn.text = "İptal"
+        netflixCancelNextBtn.text = "İptal (Geri)"
         netflixNextCard.visibility = View.VISIBLE
         netflixNextCard.bringToFront()
         cursorOverlay.bringToFront()
-        netflixPlayNextBtn.requestFocus()
+        if (!cursorOverlay.isCursorEnabled) {
+            netflixPlayNextBtn.requestFocus()
+        }
 
         uiHandler.removeCallbacks(netflixCountdownTickRunnable)
         uiHandler.post(netflixCountdownTickRunnable)
@@ -1405,19 +1408,14 @@ class MainActivity : Activity() {
                         return false;
                     };
 
-                    window.__diziPrepareAndClickMainPlayer = function() {
+                    // Sayfayı kaydırmadan ve hiçbir linke tıklamadan sadece oynatıcının ekran koordinatlarını günceller
+                    window.__diziUpdatePlayerCoordinatesOnly = function() {
                         try {
                             upgradeAllIframes();
-                            // Varsa "Tıkla İzle / Kapak / Play Overlay" butonlarına tıkla
-                            var covers = document.querySelectorAll('.player-poster, .play-overlay, .video-overlay, #player-overlay, .lazy-player, .kapak, #play-video, .video-play, .play-btn, .vjs-big-play-button, .jw-icon-display');
-                            for (var c = 0; c < covers.length; c++) {
-                                covers[c].click();
-                            }
                             var pEl = findMainPlayerElement();
                             if (pEl) {
-                                pEl.scrollIntoView({ behavior: 'instant', block: 'center' });
                                 var r = pEl.getBoundingClientRect();
-                                if (r.width > 100 && r.height > 100 && window.innerWidth > 0 && window.innerHeight > 0) {
+                                if (r.width > 160 && r.height > 100 && window.innerWidth > 0 && window.innerHeight > 0) {
                                     var rx = (r.left + r.width / 2) / window.innerWidth;
                                     var ry = (r.top + r.height / 2) / window.innerHeight;
                                     if (window.DiziBridge && DiziBridge.onPlayerRectFound) {
@@ -1449,7 +1447,7 @@ class MainActivity : Activity() {
                     } catch(e) {}
                 }
 
-                // 6) Otomatik Oynatma Denemesi (Hem ana sayfa hem de Cross-Origin Oynatıcı Iframe içinde çalışır)
+                // 6) Otomatik Oynatma Denemesi (Yalnızca sonraki bölüme otomatik geçildiğinde ve kesinlikle <a> linklerine dokunmadan!)
                 function tryAutoPlayInCurrentFrame() {
                     try {
                         if (!window.DiziBridge || !DiziBridge.isAutoPlayPending || !DiziBridge.isAutoPlayPending()) return;
@@ -1459,17 +1457,18 @@ class MainActivity : Activity() {
                             if (v.paused) {
                                 v.muted = false;
                                 v.play().catch(function() {
-                                    // Sesli otomatik oynatma jest bekliyorsa önce sessiz başlat, Android dokunuşu gelince sesi aç
                                     v.muted = true;
                                     v.play().catch(function(){});
                                 });
                             }
                         }
-                        var playBtns = document.querySelectorAll('.jw-icon-display, .jw-display-icon-container, .vjs-big-play-button, .plyr__control--overlaid, .art-state, .dplayer-play-icon, .fp-play, .play-button, .btn-play, [aria-label*="Play" i], [title*="Play" i], [title*="Oynat" i]');
+                        // Yalnızca gerçek video oynatıcılarının kendi iç Play butonlarına tıkla (Kesinlikle <a> linklerine tıklama!)
+                        var playBtns = document.querySelectorAll('.jw-icon-display, .jw-display-icon-container, .vjs-big-play-button, .plyr__control--overlaid, .art-state, .dplayer-play-icon, .fp-play');
                         for (var b = 0; b < playBtns.length; b++) {
                             var btn = playBtns[b];
+                            if (btn.closest && btn.closest('a')) continue;
                             var br = btn.getBoundingClientRect();
-                            if (br.width > 10 && br.height > 10) {
+                            if (br.width > 15 && br.height > 15) {
                                 btn.click();
                                 break;
                             }
@@ -1499,17 +1498,20 @@ class MainActivity : Activity() {
                                 continue;
                             }
 
+                            var hasValidEpisodeDuration = (typeof v.duration === 'number' && isFinite(v.duration) && v.duration >= 900);
+
                             if (!v.__diziEndedBound) {
                                 v.__diziEndedBound = true;
                                 v.addEventListener('ended', function() {
-                                    if (!countdownRequested && (v.duration > 120 || isNaN(v.duration))) {
+                                    // Yalnızca gerçekten en az 15 dakikalık (900 sn) bir bölüm videosuysa ve bu sayfada en az 60 saniye izlendiyse!
+                                    if (!countdownRequested && isFinite(v.duration) && v.duration >= 900 && tickCount >= 28 && v.currentTime >= (v.duration * 0.90)) {
                                         countdownRequested = true;
-                                        DiziBridge.onStartNetflixCountdown(5);
+                                        DiziBridge.onStartNetflixCountdown(10);
                                     }
                                 });
                             }
 
-                            if (!v.paused && !v.ended && v.currentTime > 0.25 && v.readyState >= 2) {
+                            if (!v.paused && !v.ended && v.currentTime > 0.5 && v.readyState >= 2) {
                                 anyPlaying = true;
                                 activePlayingVideo = v;
                                 tickCount++;
@@ -1521,21 +1523,27 @@ class MainActivity : Activity() {
                                     DiziBridge.videoProgress(location.href, Math.floor(v.currentTime * 1000));
                                 }
 
-                                // Video oynamaya başladığında (İlk bölümde Play'e basınca veya Sonraki Bölüme geçince) otomatik Tam Ekran yap!
+                                // Yalnızca otomatik sonraki bölüme geçildiğinde ve gerçek bölüm videosu (>10 dk) oynamaya başladığında otomatik Tam Ekran yap!
                                 if (!autoFsTriggeredInFrame && !document.fullscreenElement && !document.webkitFullscreenElement) {
-                                    if (window.DiziBridge && DiziBridge.shouldAutoFullscreenNow && DiziBridge.shouldAutoFullscreenNow()) {
-                                        autoFsTriggeredInFrame = true;
-                                        window.__diziNeedFullscreenGesture = true;
-                                        window.__diziFullscreenGestureExpireAt = Date.now() + 5500;
-                                        enterPlayerFullscreen(v);
-                                        DiziBridge.requestFullscreenTap();
+                                    if (isFinite(v.duration) && v.duration >= 600 && v.currentTime > 1.5) {
+                                        if (window.DiziBridge && DiziBridge.shouldAutoFullscreenNow && DiziBridge.shouldAutoFullscreenNow()) {
+                                            autoFsTriggeredInFrame = true;
+                                            window.__diziNeedFullscreenGesture = true;
+                                            window.__diziFullscreenGestureExpireAt = Date.now() + 4500;
+                                            enterPlayerFullscreen(v);
+                                            DiziBridge.requestFullscreenTap();
+                                        }
                                     }
                                 }
 
-                                // Bölümün bitmesine 15 saniye veya daha az kaldıysa Netflix geri sayım kartını ekrana çıkar!
-                                if (!countdownRequested && v.duration > 180 && (v.duration - v.currentTime) <= 15) {
+                                // Bölümün bitmesine 15 saniye veya daha az kaldıysa:
+                                // ŞARTLAR:
+                                // 1) Video en az 15 dakika (900 sn) uzunluğunda olmalı (reklam/fragman olamaz)
+                                // 2) Kullanıcı bu sayfada videoyu en az ~60 saniyedir (tickCount >= 28) aktif izliyor olmalı (sayfa açılır açılmaz asla tetiklenmez!)
+                                // 3) Videonun en az %92'si bitmiş ve son 15 saniye içine girilmiş olmalı
+                                if (!countdownRequested && hasValidEpisodeDuration && tickCount >= 28 && (v.currentTime / v.duration) >= 0.92 && (v.duration - v.currentTime) <= 15) {
                                     countdownRequested = true;
-                                    var rem = Math.max(4, Math.floor(v.duration - v.currentTime));
+                                    var rem = Math.max(8, Math.min(15, Math.floor(v.duration - v.currentTime)));
                                     DiziBridge.onStartNetflixCountdown(rem);
                                 }
                             }
@@ -1602,13 +1610,14 @@ class MainActivity : Activity() {
             if (!isAutoNextEnabled || hasAutoFullscreenedCurrentPage || customFullscreenView != null) {
                 return false
             }
-            val inAutoNextWindow = System.currentTimeMillis() < autoNextTransitionActiveUntilMs
-            return inAutoNextWindow || hasDetectedNextEpisode()
+            // Yalnızca otomatik olarak sonraki bölüme geçildiğinde (autoNextTransitionActiveUntilMs) otomatik tam ekran yap;
+            // ilk açılışta kullanıcının kaynak/altyazı seçimine asla müdahale etme!
+            return System.currentTimeMillis() < autoNextTransitionActiveUntilMs
         }
 
         @JavascriptInterface
         fun onPlayerRectFound(ratioX: Float, ratioY: Float) {
-            if (ratioX in 0.10f..0.90f && ratioY in 0.10f..0.90f) {
+            if (ratioX in 0.15f..0.85f && ratioY in 0.15f..0.85f) {
                 playerCenterRatioX = ratioX
                 playerCenterRatioY = ratioY
             }
@@ -1617,10 +1626,9 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun requestFullscreenTap() {
             runOnUiThread {
-                if (customFullscreenView == null && !hasAutoFullscreenedCurrentPage) {
+                if (customFullscreenView == null && !hasAutoFullscreenedCurrentPage && System.currentTimeMillis() < autoNextTransitionActiveUntilMs) {
                     uiHandler.removeCallbacks(autoFullscreenTapRunnable)
-                    uiHandler.postDelayed(autoFullscreenTapRunnable, 350L)
-                    uiHandler.postDelayed(autoFullscreenTapRunnable, 1600L)
+                    uiHandler.postDelayed(autoFullscreenTapRunnable, 400L)
                 }
             }
         }
@@ -1685,18 +1693,26 @@ class MainActivity : Activity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val isOkKey = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER
 
-        // Eğer Netflix tarzı Sonraki Bölüm kartı odaklanmışsa veya geri sayım çalışıyorsa:
+        // Kullanıcı kumandadan herhangi bir yön veya geri tuşuna bastığı anda otomatik dokunuşları iptal et (Tam müdahale alanı!)
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_BACK -> {
+                    uiHandler.removeCallbacks(autoPlayTapAssistRunnable)
+                    uiHandler.removeCallbacks(autoFullscreenTapRunnable)
+                }
+            }
+        }
+
+        // Eğer Netflix tarzı Sonraki Bölüm kartı odaklanmışsa:
         if (netflixNextCard.visibility == View.VISIBLE && netflixNextCard.hasFocus()) {
             return super.dispatchKeyEvent(event)
         }
 
-        // Geri sayım aktifken odak kartta olmasa bile kısa OK tuşuna basılırsa hemen sonraki bölüme geç!
-        if (isNetflixCountdownRunning && isOkKey && event.action == KeyEvent.ACTION_UP && !okLongPressConsumed) {
-            triggerTransitionToNextEpisode()
-            return true
-        }
-
-        // Web ekranındayken OK tuşu hem kısa basma (Tıkla + Netflix Sonraki Bölüm Kartını Göster) hem de 1 sn basılı tutma (İmleci Aç/Kapat)
+        // Web ekranındayken OK tuşu: Kısa basma (Tıkla) ve 1 sn basılı tutma (İmleci Aç/Kapat)
         if (currentScreen == ScreenState.WEB && !topBar.hasFocus() && isOkKey) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) {
@@ -1712,13 +1728,7 @@ class MainActivity : Activity() {
                     return true
                 }
 
-                // Tam ekranda veya video izlerken OK tuşuna basıldığında, sitede sonraki bölüm varsa
-                // sağ altta Netflix tarzı "Sonraki Bölüme Geç" kartını da çıkar!
-                if (customFullscreenView != null || !cursorOverlay.isCursorEnabled) {
-                    showNetflixNextEpisodePeek()
-                }
-
-                // Eğer imleç sağ alttaki Netflix kartının üzerindeyse ve OK'a basıldıysa doğrudan sonraki bölüme geç
+                // Eğer sağ üstteki Netflix kartı görünür durumdaysa ve kullanıcı imleci bizzat kartın üzerine getirip OK'a bastıysa:
                 if (netflixNextCard.visibility == View.VISIBLE && cursorOverlay.isCursorEnabled) {
                     val loc = IntArray(2)
                     netflixNextCard.getLocationOnScreen(loc)
@@ -1727,7 +1737,14 @@ class MainActivity : Activity() {
                     if (cx in loc[0].toFloat()..(loc[0] + netflixNextCard.width).toFloat() &&
                         cy in loc[1].toFloat()..(loc[1] + netflixNextCard.height).toFloat()
                     ) {
-                        triggerTransitionToNextEpisode()
+                        val cancelLoc = IntArray(2)
+                        netflixCancelNextBtn.getLocationOnScreen(cancelLoc)
+                        if (cx in cancelLoc[0].toFloat()..(cancelLoc[0] + netflixCancelNextBtn.width).toFloat()) {
+                            stopNetflixCountdown(cancelledByUser = true)
+                            showFloatingCursorBanner("⏹️ Otomatik geçiş bu bölüm için iptal edildi")
+                        } else {
+                            triggerTransitionToNextEpisode()
+                        }
                         return true
                     }
                 }

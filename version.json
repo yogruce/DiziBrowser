@@ -1,0 +1,6 @@
+{
+  "versionCode": 7,
+  "versionName": "1.4.0",
+  "apkUrl": "https://raw.githubusercontent.com/yogruce/DiziBrowser/main/DiziBrowser-TV-v1.0.apk",
+  "changelog": "• Sonraki Bölüm butonu olan siteler için açılır/kapanır Otomatik Bölüm Geçişi eklendi.\n• GitHub üzerinden Google Play gerektirmeyen tek tuşla Otomatik APK Güncelleme eklendi."
+}

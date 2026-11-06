@@ -3,6 +3,7 @@ package com.dizibrowser.tv
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
@@ -60,8 +61,10 @@ class MainActivity : Activity() {
     private lateinit var backButton: Button
     private lateinit var homeButton: Button
     private lateinit var goButton: Button
+    private lateinit var autoNextButton: Button
     private lateinit var historyButton: Button
     private lateinit var qrButton: Button
+    private lateinit var updateButton: Button
     private lateinit var addressBar: EditText
     private lateinit var statusBar: TextView
     private lateinit var blockedCounterText: TextView
@@ -83,6 +86,12 @@ class MainActivity : Activity() {
     private var lastRecordedUrl = ""
     private var lastRecordAt = 0L
 
+    // Otomatik Sonraki Bölüm Ayarı ve Sitede Tespit Edilen Sonraki Bölüm Durumu
+    private var isAutoNextEnabled = true
+    private var detectedNextEpisodeUrl: String = ""
+    private var detectedNextEpisodeLabel: String = ""
+    private var shouldAutoStartVideoAfterNextTransition = false
+
     // OK tuşuna basılı tutulduğunda web sayfasının yanlışlıkla tıklama algılamasını tamamen önleyen bayrak
     private var okLongPressConsumed = false
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -102,6 +111,8 @@ class MainActivity : Activity() {
 
         AdBlocker.init(this)
         history = WatchHistory(this)
+        val settingsPrefs = getSharedPreferences("dizi_settings", Context.MODE_PRIVATE)
+        isAutoNextEnabled = settingsPrefs.getBoolean("auto_next_enabled", true)
 
         topBar = findViewById(R.id.topBar)
         bottomBar = findViewById(R.id.bottomBar)
@@ -112,8 +123,10 @@ class MainActivity : Activity() {
         backButton = findViewById(R.id.backButton)
         homeButton = findViewById(R.id.homeButton)
         goButton = findViewById(R.id.goButton)
+        autoNextButton = findViewById(R.id.autoNextButton)
         historyButton = findViewById(R.id.historyButton)
         qrButton = findViewById(R.id.qrButton)
+        updateButton = findViewById(R.id.updateButton)
         addressBar = findViewById(R.id.addressBar)
         statusBar = findViewById(R.id.statusBar)
         blockedCounterText = findViewById(R.id.blockedCounterText)
@@ -123,6 +136,7 @@ class MainActivity : Activity() {
         setupWebView()
         setupTopBarButtons()
         startRemoteControlServer()
+        updateAutoNextButtonUi()
 
         // Arka planda güncel reklam ve zararlı alan adı listesini çek
         AdBlocker.updateRemoteFilterList(this) { totalRules ->
@@ -130,6 +144,9 @@ class MainActivity : Activity() {
                 statusBar.text = "🛡️ Kalkan Aktif ($totalRules filtre) • OK Basılı Tut: İmleç Aç/Kapat"
             }
         }
+
+        // Uygulama açılışında sessizce GitHub'da yeni APK güncellemesi var mı kontrol et
+        AppUpdater.checkForUpdates(this, silentIfUpToDate = true)
 
         // Harici link ile açıldıysa doğrudan o adrese git
         val incomingUrl = intent?.dataString
@@ -229,6 +246,9 @@ class MainActivity : Activity() {
             }
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                detectedNextEpisodeUrl = ""
+                detectedNextEpisodeLabel = ""
+                updateAutoNextButtonUi()
                 addressBar.setText(url)
                 updateFavoriteButtonState(url)
                 updateBackButtonVisual()
@@ -243,8 +263,6 @@ class MainActivity : Activity() {
                 updateBlockedCounterUi()
                 statusBar.text = "🛡️ Kalkan Aktif • OK Basılı Tut: İmleci Aç/Kapat • En alta inince sayfa kayar"
 
-                // Sayfa yüklendiğinde eğer anlamlı bir web sayfasıysa otomatik geçmişe kaydet
-                // (Cross-origin iframe kullanan dizi sitelerinde bile geçmişin %100 çalışmasını sağlar)
                 val pageTitle = view.title?.trim().orEmpty()
                 if (shouldRecordPageInHistory(url)) {
                     recordHistoryAsync(url, pageTitle.ifBlank { url }, -1L)
@@ -256,7 +274,6 @@ class MainActivity : Activity() {
 
             override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
                 super.doUpdateVisitedHistory(view, url, isReload)
-                // Tek sayfa uygulamalarında (SPA) bölüm değiştiğinde geçmişi yakala
                 if (!isReload && shouldRecordPageInHistory(url)) {
                     val pageTitle = view.title?.trim().orEmpty()
                     recordHistoryAsync(url, pageTitle.ifBlank { url }, -1L)
@@ -295,7 +312,6 @@ class MainActivity : Activity() {
                 isUserGesture: Boolean,
                 resultMsg: android.os.Message?
             ): Boolean {
-                // Popup reklam pencerelerini tamamen engelle
                 AdBlocker.blockedCount.incrementAndGet()
                 updateBlockedCounterUi("🚫 Popup pencere engellendi")
                 return false
@@ -315,7 +331,6 @@ class MainActivity : Activity() {
                 if (view != null) {
                     fullscreenContainer.addView(view, FrameLayout.LayoutParams(-1, -1))
                 }
-                // Tam ekrana geçince o anki sayfayı kesin olarak geçmişe kaydet
                 val currentUrl = web.url.orEmpty()
                 if (isSafeWebUrl(currentUrl)) {
                     recordHistoryAsync(currentUrl, web.title?.trim().orEmpty().ifBlank { currentUrl }, -1L)
@@ -352,9 +367,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /**
-     * Arama motoru ana sayfaları hariç ziyaret edilen tüm dizi/film/bölüm sayfalarını geçmişe kaydeder.
-     */
     private fun shouldRecordPageInHistory(url: String): Boolean {
         if (!isSafeWebUrl(url)) return false
         val lower = url.lowercase()
@@ -381,9 +393,11 @@ class MainActivity : Activity() {
             addressBar,
             goButton,
             cursorButton,
+            autoNextButton,
             favButton,
             historyButton,
-            qrButton
+            qrButton,
+            updateButton
         ).filter { it.visibility == View.VISIBLE }
 
         var matchedView: View? = null
@@ -418,15 +432,75 @@ class MainActivity : Activity() {
         uiHandler.postDelayed(hideHintRunnable, 4000L)
     }
 
+    /**
+     * Sitede "Sonraki Bölüm" butonu varsa üst bardaki Oto-Bölüm butonunu görünür ve aktif yapar.
+     * Sitede sonraki bölüm işlevi yoksa butonu tamamen gizler/pasif tutar.
+     */
+    private fun updateAutoNextButtonUi() {
+        val hasNextEpisodeOnSite = detectedNextEpisodeUrl.isNotBlank() || detectedNextEpisodeLabel.isNotBlank()
+        if (!hasNextEpisodeOnSite || currentScreen != ScreenState.WEB) {
+            autoNextButton.visibility = View.GONE
+            return
+        }
+
+        autoNextButton.visibility = View.VISIBLE
+        if (isAutoNextEnabled) {
+            autoNextButton.text = "⏭️ Oto-Bölüm: Açık"
+            autoNextButton.setTextColor(Color.parseColor("#7EE787"))
+        } else {
+            autoNextButton.text = "⏭️ Oto-Bölüm: Kapalı"
+            autoNextButton.setTextColor(Color.LTGRAY)
+        }
+    }
+
+    private fun toggleAutoNextEpisodeMode() {
+        val hasNextEpisodeOnSite = detectedNextEpisodeUrl.isNotBlank() || detectedNextEpisodeLabel.isNotBlank()
+        if (!hasNextEpisodeOnSite) {
+            Toast.makeText(
+                this,
+                "Bu sayfada 'Sonraki Bölüm' butonu tespit edilemediği için bu özellik pasiftir.",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        isAutoNextEnabled = !isAutoNextEnabled
+        getSharedPreferences("dizi_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("auto_next_enabled", isAutoNextEnabled)
+            .apply()
+
+        updateAutoNextButtonUi()
+        val msg = if (isAutoNextEnabled) {
+            "⏭️ Otomatik Sonraki Bölüm: AÇIK (Bölüm bitince otomatik geçer ve başlatır)"
+        } else {
+            "⏭️ Otomatik Sonraki Bölüm: KAPALI"
+        }
+        statusBar.text = msg
+        showFloatingCursorBanner(msg)
+    }
+
     private fun setupTopBarButtons() {
         backButton.setOnClickListener { handleTopBackAction() }
         homeButton.setOnClickListener { showHome() }
         goButton.setOnClickListener { navigateFromAddress() }
         historyButton.setOnClickListener { showHistory() }
         qrButton.setOnClickListener { showQrRemoteDialog() }
+        updateButton.setOnClickListener { AppUpdater.checkForUpdates(this, silentIfUpToDate = false) }
 
         cursorButton.setOnClickListener {
             toggleCursorMode()
+        }
+
+        autoNextButton.setOnClickListener {
+            toggleAutoNextEpisodeMode()
+        }
+        autoNextButton.setOnLongClickListener {
+            // Uzun basılırsa hemen sonraki bölüme manuel geçiş yap
+            if (detectedNextEpisodeUrl.isNotBlank()) {
+                triggerTransitionToNextEpisode()
+            }
+            true
         }
 
         favButton.setOnClickListener {
@@ -449,6 +523,30 @@ class MainActivity : Activity() {
         addressBar.setOnEditorActionListener { _, _, _ ->
             navigateFromAddress()
             true
+        }
+    }
+
+    private fun triggerTransitionToNextEpisode() {
+        if (!isAutoNextEnabled) return
+        val nextUrl = detectedNextEpisodeUrl
+        runOnUiThread {
+            if (customFullscreenView != null) {
+                web.webChromeClient?.onHideCustomView()
+            }
+            shouldAutoStartVideoAfterNextTransition = true
+            if (nextUrl.isNotBlank() && isSafeWebUrl(nextUrl)) {
+                showFloatingCursorBanner("⏭️ Sonraki bölüme otomatik geçiliyor...")
+                statusBar.text = "⏭️ Sonraki bölüm açılıyor: $nextUrl"
+                addressBar.setText(nextUrl)
+                web.loadUrl(nextUrl)
+            } else {
+                // JS üzerinden sitedeki sonraki bölüm butonuna tıkla
+                showFloatingCursorBanner("⏭️ Sonraki bölüm butonuna tıklanıyor...")
+                web.evaluateJavascript(
+                    "if (window.__diziClickNextEpisode) window.__diziClickNextEpisode();",
+                    null
+                )
+            }
         }
     }
 
@@ -632,7 +730,6 @@ class MainActivity : Activity() {
         host.addView(web, FrameLayout.LayoutParams(-1, -1))
         web.visibility = View.VISIBLE
 
-        // Sayfa açılır açılmaz odağı üst çubuktan alıp imlece ver!
         cursorOverlay.centerCursor()
         activateWebCursorNow()
         showFloatingCursorBanner("🖱️ İmleci Açmak/Kapatmak için OK tuşuna 1 sn basılı tutabilirsiniz")
@@ -642,7 +739,7 @@ class MainActivity : Activity() {
     private fun showHome() {
         currentScreen = ScreenState.HOME
         updateBackButtonVisual()
-        // Ana ekranda kumandayla butonlar arasında standart geçiş yapılabilmesi için imleci gizle
+        updateAutoNextButtonUi()
         cursorOverlay.visibility = View.GONE
         floatingCursorHint.visibility = View.GONE
         host.removeAllViews()
@@ -668,8 +765,9 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
         }
+        val verName = AppUpdater.getCurrentVersionName(this)
         titleCol.addView(TextView(this).apply {
-            text = "📺 DİZİ BROWSER TV"
+            text = "📺 DİZİ BROWSER TV (v$verName)"
             textSize = 26f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.parseColor("#00E5FF"))
@@ -681,12 +779,24 @@ class MainActivity : Activity() {
         })
         headerRow.addView(titleCol)
 
+        val updateHomeBtn = Button(this).apply {
+            text = "🔄 Uygulamayı Güncelle"
+            textSize = 13f
+            setTextColor(Color.parseColor("#7EE787"))
+            setBackgroundResource(R.drawable.tv_button_bg)
+            setPadding(22, 14, 22, 14)
+            setOnClickListener { AppUpdater.checkForUpdates(this@MainActivity, silentIfUpToDate = false) }
+        }
+        headerRow.addView(updateHomeBtn, LinearLayout.LayoutParams(-2, -2).apply {
+            setMargins(0, 0, 10, 0)
+        })
+
         val qrQuickBtn = Button(this).apply {
             text = "📱 Telefondan Link Gönder (QR)"
             textSize = 13f
             setTextColor(Color.WHITE)
             setBackgroundResource(R.drawable.tv_button_bg)
-            setPadding(24, 14, 24, 14)
+            setPadding(22, 14, 22, 14)
             setOnClickListener { showQrRemoteDialog() }
         }
         headerRow.addView(qrQuickBtn)
@@ -833,6 +943,7 @@ class MainActivity : Activity() {
     private fun showHistory() {
         currentScreen = ScreenState.HISTORY
         updateBackButtonVisual()
+        updateAutoNextButtonUi()
         cursorOverlay.visibility = View.GONE
         floatingCursorHint.visibility = View.GONE
         host.removeAllViews()
@@ -934,10 +1045,102 @@ class MainActivity : Activity() {
         """.trimIndent()
         web.evaluateJavascript(focusAndPlayerHelperJs, null)
 
-        // 2. Hafifletilmiş HTML5 video takipçisi (1 saniye yerine 5 saniyede bir çalışır, CPU yormaz)
+        // 2. Eğer önceki bölümden otomatik geçiş yapıldıysa yeni bölümdeki videoyu otomatik başlat
+        if (shouldAutoStartVideoAfterNextTransition) {
+            shouldAutoStartVideoAfterNextTransition = false
+            web.evaluateJavascript(
+                """
+                (function() {
+                    var attempts = 0;
+                    var autoPlayTimer = setInterval(function() {
+                        attempts++;
+                        var v = document.querySelector('video');
+                        if (v) {
+                            v.play().catch(function(){});
+                            clearInterval(autoPlayTimer);
+                        } else {
+                            var playBtns = document.querySelectorAll('.jw-icon-display, .vjs-big-play-button, .plyr__control--overlaid, [aria-label*="Play"], [title*="Oynat"]');
+                            if (playBtns.length > 0) {
+                                playBtns[0].click();
+                                clearInterval(autoPlayTimer);
+                            }
+                        }
+                        if (attempts > 8) clearInterval(autoPlayTimer);
+                    }, 1200);
+                })();
+                """.trimIndent(),
+                null
+            )
+        }
+
+        // 3. Sitede "Sonraki Bölüm" butonu/linki var mı tespit et ve video bittiğinde otomatik geç
         val savedResumeSec = (history.getResumePosition(web.url ?: "", "") / 1000L)
-        val trackerJs = """
+        val trackerAndNextEpisodeJs = """
             (function() {
+                // Sitedeki Sonraki Bölüm butonunu bulan akıllı tarayıcı
+                function findNextEpisodeElement() {
+                    var keywords = [
+                        'sonraki bölüm', 'sonraki bolum', 'gelecek bölüm', 'sıradaki bölüm',
+                        'next episode', 'sonraki >', 'sonraki »', 'bölüm ileri'
+                    ];
+                    var candidates = document.querySelectorAll('a[href], button, [role="button"], .next-episode, .sonraki-bolum, [class*="next-ep"], [id*="next"]');
+                    for (var i = 0; i < candidates.length; i++) {
+                        var el = candidates[i];
+                        var text = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase().trim();
+                        var cls = ((el.className || '') + ' ' + (el.id || '')).toLowerCase();
+                        var href = el.getAttribute('href') || '';
+                        if (href.startsWith('javascript:') || href === '#') href = '';
+
+                        for (var k = 0; k < keywords.length; k++) {
+                            if (text.indexOf(keywords[k]) !== -1) {
+                                return { el: el, url: el.href || '', label: text.substring(0, 40) };
+                            }
+                        }
+                        if ((cls.indexOf('next-ep') !== -1 || cls.indexOf('sonraki') !== -1 || el.getAttribute('rel') === 'next') && (el.href || el.tagName === 'BUTTON')) {
+                            return { el: el, url: el.href || '', label: text || 'Sonraki Bölüm' };
+                        }
+                    }
+
+                    // URL içinde bolum-3 / episode-3 gibi numara varsa sayfada bolum-4 linki var mı bak
+                    var loc = location.href;
+                    var m = loc.match(/(bolum|episode|ep|part)([-_\/])(\d+)/i);
+                    if (m) {
+                        var nextNum = parseInt(m[3], 10) + 1;
+                        var nextPattern = m[1] + m[2] + nextNum;
+                        var links = document.querySelectorAll('a[href]');
+                        for (var j = 0; j < links.length; j++) {
+                            var a = links[j];
+                            if (a.href && a.href.toLowerCase().indexOf(nextPattern.toLowerCase()) !== -1) {
+                                return { el: a, url: a.href, label: 'Bölüm ' + nextNum };
+                            }
+                        }
+                    }
+                    return null;
+                }
+
+                window.__diziClickNextEpisode = function() {
+                    var found = findNextEpisodeElement();
+                    if (found && found.el) {
+                        found.el.click();
+                        return true;
+                    }
+                    return false;
+                };
+
+                function checkAndReportNextEpisode() {
+                    try {
+                        var found = findNextEpisodeElement();
+                        if (found) {
+                            DiziBridge.onNextEpisodeDetected(found.url || '', found.label || 'Sonraki Bölüm');
+                        } else {
+                            DiziBridge.onNextEpisodeDetected('', '');
+                        }
+                    } catch(e) {}
+                }
+
+                checkAndReportNextEpisode();
+                setTimeout(checkAndReportNextEpisode, 3000);
+
                 if (window.__diziTrackerInstalled) return;
                 window.__diziTrackerInstalled = true;
                 var recorded = false;
@@ -945,13 +1148,24 @@ class MainActivity : Activity() {
                 var resumeTarget = $savedResumeSec;
                 var resumeApplied = false;
                 var wasPlaying = false;
+                var nextTriggered = false;
 
                 setInterval(function() {
                     try {
+                        checkAndReportNextEpisode();
                         var videos = document.querySelectorAll('video');
                         var anyPlaying = false;
                         for (var i = 0; i < videos.length; i++) {
                             var v = videos[i];
+                            if (!v.__diziEndedBound) {
+                                v.__diziEndedBound = true;
+                                v.addEventListener('ended', function() {
+                                    if (!nextTriggered && v.duration > 120) {
+                                        nextTriggered = true;
+                                        DiziBridge.onEpisodeEnded();
+                                    }
+                                });
+                            }
                             if (!resumeApplied && resumeTarget > 15 && v.readyState >= 1 && v.currentTime < 5) {
                                 v.currentTime = resumeTarget;
                                 resumeApplied = true;
@@ -965,6 +1179,11 @@ class MainActivity : Activity() {
                                 } else if (tickCount % 6 === 0) {
                                     DiziBridge.videoProgress(location.href, Math.floor(v.currentTime * 1000));
                                 }
+                                // Bölümün bitmesine 3 saniyeden az kaldıysa ve en az 5 dakikalık bir bölümse
+                                if (!nextTriggered && v.duration > 300 && (v.duration - v.currentTime) <= 3) {
+                                    nextTriggered = true;
+                                    DiziBridge.onEpisodeEnded();
+                                }
                             }
                         }
                         if (anyPlaying && !wasPlaying) {
@@ -977,7 +1196,7 @@ class MainActivity : Activity() {
                 }, 5000);
             })();
         """.trimIndent()
-        web.evaluateJavascript(trackerJs, null)
+        web.evaluateJavascript(trackerAndNextEpisodeJs, null)
     }
 
     inner class DiziJsBridge {
@@ -1004,6 +1223,28 @@ class MainActivity : Activity() {
         fun onVideoStartedPlaying() {
             runOnUiThread {
                 cursorOverlay.hideCursorImmediately()
+            }
+        }
+
+        @JavascriptInterface
+        fun onNextEpisodeDetected(nextUrl: String, label: String) {
+            runOnUiThread {
+                val changed = (detectedNextEpisodeUrl != nextUrl || detectedNextEpisodeLabel != label)
+                detectedNextEpisodeUrl = nextUrl.trim()
+                detectedNextEpisodeLabel = label.trim()
+                if (changed) {
+                    updateAutoNextButtonUi()
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onEpisodeEnded() {
+            runOnUiThread {
+                val hasNext = detectedNextEpisodeUrl.isNotBlank() || detectedNextEpisodeLabel.isNotBlank()
+                if (isAutoNextEnabled && hasNext) {
+                    triggerTransitionToNextEpisode()
+                }
             }
         }
     }
@@ -1061,17 +1302,23 @@ class MainActivity : Activity() {
                     }
                     KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
                         web.evaluateJavascript(
-                            "(function(){var v=document.querySelector('video');if(v)v.currentTime+=10;})()",
+                            "(function(){var v=document.querySelector('video');if(v){v.currentTime+=10;})()",
                             null
                         )
                         return true
                     }
                     KeyEvent.KEYCODE_MEDIA_REWIND -> {
                         web.evaluateJavascript(
-                            "(function(){var v=document.querySelector('video');if(v)v.currentTime=Math.max(0,v.currentTime-10);})()",
+                            "(function(){var v=document.querySelector('video');if(v){v.currentTime=Math.max(0,v.currentTime-10);})()",
                             null
                         )
                         return true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                        if (detectedNextEpisodeUrl.isNotBlank() || detectedNextEpisodeLabel.isNotBlank()) {
+                            triggerTransitionToNextEpisode()
+                            return true
+                        }
                     }
                     KeyEvent.KEYCODE_MENU,
                     KeyEvent.KEYCODE_PROG_YELLOW,

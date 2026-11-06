@@ -11,8 +11,8 @@ android {
         applicationId = "com.dizibrowser.tv"
         minSdk = 21
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.4.0"
+        versionCode = 8
+        versionName = "1.5.0"
     }
 
     signingConfigs {

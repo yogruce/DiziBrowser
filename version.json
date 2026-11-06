@@ -1,6 +1,6 @@
 {
-  "versionCode": 7,
-  "versionName": "1.4.0",
+  "versionCode": 8,
+  "versionName": "1.5.0",
   "apkUrl": "https://raw.githubusercontent.com/yogruce/DiziBrowser/main/DiziBrowser-TV-v1.0.apk",
-  "changelog": "• Sonraki Bölüm butonu olan siteler için açılır/kapanır Otomatik Bölüm Geçişi eklendi.\n• GitHub üzerinden Google Play gerektirmeyen tek tuşla Otomatik APK Güncelleme eklendi."
+  "changelog": "• Netflix tarzı Sonraki Bölüm kartı eklendi: Tam ekranda bile OK tuşuna basınca sağ altta çıkar, bölüm sonuna 15 sn kala geri sayımla otomatik sonraki bölüme geçer.\n• GitHub üzerinden tek tuşla Otomatik APK Güncelleme eklendi."
 }

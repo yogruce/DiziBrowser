@@ -58,6 +58,14 @@ class MainActivity : Activity() {
     private lateinit var fullscreenContainer: FrameLayout
     private lateinit var cursorOverlay: CursorOverlayView
     private lateinit var floatingCursorHint: TextView
+
+    // Netflix Tarzı Sonraki Bölüm Overlay Bileşenleri
+    private lateinit var netflixNextCard: LinearLayout
+    private lateinit var netflixNextTitle: TextView
+    private lateinit var netflixNextSubtitle: TextView
+    private lateinit var netflixPlayNextBtn: Button
+    private lateinit var netflixCancelNextBtn: Button
+
     private lateinit var backButton: Button
     private lateinit var homeButton: Button
     private lateinit var goButton: Button
@@ -74,7 +82,6 @@ class MainActivity : Activity() {
     private lateinit var history: WatchHistory
     private var remoteServer: RemoteWebServer? = null
 
-    // Disk / Geçmiş yazma işlemlerini arka planda yaparak videonun takılmasını %100 önleyen tekli iş parçacığı
     private val historyIoExecutor = Executors.newSingleThreadExecutor()
 
     private var currentScreen = ScreenState.HOME
@@ -86,17 +93,42 @@ class MainActivity : Activity() {
     private var lastRecordedUrl = ""
     private var lastRecordAt = 0L
 
-    // Otomatik Sonraki Bölüm Ayarı ve Sitede Tespit Edilen Sonraki Bölüm Durumu
+    // Otomatik Sonraki Bölüm ve Netflix Geri Sayım Durumu
     private var isAutoNextEnabled = true
     private var detectedNextEpisodeUrl: String = ""
     private var detectedNextEpisodeLabel: String = ""
     private var shouldAutoStartVideoAfterNextTransition = false
+    private var isNetflixCountdownRunning = false
+    private var isNetflixCountdownCancelledForCurrentPage = false
+    private var netflixCountdownSeconds = 10
 
     // OK tuşuna basılı tutulduğunda web sayfasının yanlışlıkla tıklama algılamasını tamamen önleyen bayrak
     private var okLongPressConsumed = false
     private val uiHandler = Handler(Looper.getMainLooper())
     private val hideHintRunnable = Runnable {
         floatingCursorHint.visibility = View.GONE
+    }
+    private val hideNetflixPeekRunnable = Runnable {
+        if (!isNetflixCountdownRunning) {
+            netflixNextCard.visibility = View.GONE
+        }
+    }
+    private val netflixCountdownTickRunnable = object : Runnable {
+        override fun run() {
+            if (!isNetflixCountdownRunning) return
+            if (netflixCountdownSeconds <= 0) {
+                isNetflixCountdownRunning = false
+                netflixNextCard.visibility = View.GONE
+                triggerTransitionToNextEpisode()
+                return
+            }
+            val label = detectedNextEpisodeLabel.ifBlank { "Sonraki Bölüm" }
+            netflixNextTitle.text = "⏭️ SIRADAKİ: ${label.uppercase(Locale.getDefault())}"
+            netflixNextSubtitle.text = "Sonraki bölüm $netflixCountdownSeconds saniye içinde başlıyor... (OK ile hemen geç)"
+            netflixPlayNextBtn.text = "▶ Şimdi Geç ($netflixCountdownSeconds)"
+            netflixCountdownSeconds--
+            uiHandler.postDelayed(this, 1000L)
+        }
     }
 
     private enum class ScreenState {
@@ -120,6 +152,13 @@ class MainActivity : Activity() {
         fullscreenContainer = findViewById(R.id.fullscreenContainer)
         cursorOverlay = findViewById(R.id.cursorOverlay)
         floatingCursorHint = findViewById(R.id.floatingCursorHint)
+
+        netflixNextCard = findViewById(R.id.netflixNextCard)
+        netflixNextTitle = findViewById(R.id.netflixNextTitle)
+        netflixNextSubtitle = findViewById(R.id.netflixNextSubtitle)
+        netflixPlayNextBtn = findViewById(R.id.netflixPlayNextBtn)
+        netflixCancelNextBtn = findViewById(R.id.netflixCancelNextBtn)
+
         backButton = findViewById(R.id.backButton)
         homeButton = findViewById(R.id.homeButton)
         goButton = findViewById(R.id.goButton)
@@ -135,6 +174,7 @@ class MainActivity : Activity() {
 
         setupWebView()
         setupTopBarButtons()
+        setupNetflixCardButtons()
         startRemoteControlServer()
         updateAutoNextButtonUi()
 
@@ -158,12 +198,80 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun setupNetflixCardButtons() {
+        netflixPlayNextBtn.setOnClickListener {
+            stopNetflixCountdown(cancelledByUser = false)
+            triggerTransitionToNextEpisode()
+        }
+        netflixCancelNextBtn.setOnClickListener {
+            stopNetflixCountdown(cancelledByUser = true)
+            showFloatingCursorBanner("⏹️ Otomatik geçiş bu bölüm için iptal edildi")
+        }
+    }
+
+    private fun hasDetectedNextEpisode(): Boolean {
+        return detectedNextEpisodeUrl.isNotBlank() || detectedNextEpisodeLabel.isNotBlank()
+    }
+
+    /**
+     * Netflix tarzı geri sayım kartını başlatır (Bölümün son 15 saniyesinde veya bittiğinde).
+     * Tam ekran videonun da üzerinde görünür!
+     */
+    private fun startNetflixCountdown(initialSeconds: Int = 10) {
+        if (!isAutoNextEnabled || !hasDetectedNextEpisode() || isNetflixCountdownCancelledForCurrentPage) return
+        if (isNetflixCountdownRunning) return
+
+        isNetflixCountdownRunning = true
+        netflixCountdownSeconds = initialSeconds.coerceIn(3, 15)
+        uiHandler.removeCallbacks(hideNetflixPeekRunnable)
+
+        netflixCancelNextBtn.text = "İptal"
+        netflixNextCard.visibility = View.VISIBLE
+        netflixNextCard.bringToFront()
+        cursorOverlay.bringToFront()
+        netflixPlayNextBtn.requestFocus()
+
+        uiHandler.removeCallbacks(netflixCountdownTickRunnable)
+        uiHandler.post(netflixCountdownTickRunnable)
+    }
+
+    /**
+     * Kullanıcı tam ekranda veya video izlerken kumandaya / OK tuşuna bastığında,
+     * eğer sitede "Sonraki Bölüm" varsa sağ altta 5 saniyeliğine Netflix tarzı "Sonraki Bölüme Geç" kartını gösterir!
+     */
+    private fun showNetflixNextEpisodePeek() {
+        if (!isAutoNextEnabled || !hasDetectedNextEpisode() || isNetflixCountdownRunning) return
+        if (currentScreen != ScreenState.WEB) return
+
+        val label = detectedNextEpisodeLabel.ifBlank { "Sonraki Bölüm" }
+        netflixNextTitle.text = "⏭️ SIRADAKİ: ${label.uppercase(Locale.getDefault())}"
+        netflixNextSubtitle.text = "İstediğiniz an sonraki bölüme geçebilirsiniz"
+        netflixPlayNextBtn.text = "▶ Sonraki Bölüme Geç"
+        netflixCancelNextBtn.text = "Gizle"
+
+        netflixNextCard.visibility = View.VISIBLE
+        netflixNextCard.bringToFront()
+        cursorOverlay.bringToFront()
+
+        uiHandler.removeCallbacks(hideNetflixPeekRunnable)
+        uiHandler.postDelayed(hideNetflixPeekRunnable, 5000L)
+    }
+
+    private fun stopNetflixCountdown(cancelledByUser: Boolean) {
+        isNetflixCountdownRunning = false
+        if (cancelledByUser) {
+            isNetflixCountdownCancelledForCurrentPage = true
+        }
+        uiHandler.removeCallbacks(netflixCountdownTickRunnable)
+        uiHandler.removeCallbacks(hideNetflixPeekRunnable)
+        netflixNextCard.visibility = View.GONE
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
         web = WebView(this).apply {
             isFocusable = true
             isFocusableInTouchMode = true
-            // Donanım hızlandırma katmanı: TV GPU'sunu kullanarak video kare düşüşlerini (takılmayı) önler
             setLayerType(View.LAYER_TYPE_HARDWARE, null)
         }
         WebView.setWebContentsDebuggingEnabled(false)
@@ -178,7 +286,7 @@ class MainActivity : Activity() {
             useWideViewPort = true
             loadWithOverviewMode = true
             cacheMode = WebSettings.LOAD_DEFAULT
-            setSupportMultipleWindows(true) // onCreateWindow ile yakalayıp popup engellemek için
+            setSupportMultipleWindows(true)
             javaScriptCanOpenWindowsAutomatically = false
             allowFileAccess = false
             allowContentAccess = false
@@ -194,7 +302,6 @@ class MainActivity : Activity() {
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, false)
 
-        // Zararlı / APK / EXE dosya indirme kilidi
         web.setDownloadListener(DownloadListener { url, _, _, mimetype, _ ->
             runOnUiThread {
                 if (AdBlocker.isDangerousDownload(url) || mimetype?.contains("android.package-archive") == true) {
@@ -248,6 +355,8 @@ class MainActivity : Activity() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 detectedNextEpisodeUrl = ""
                 detectedNextEpisodeLabel = ""
+                isNetflixCountdownCancelledForCurrentPage = false
+                stopNetflixCountdown(cancelledByUser = false)
                 updateAutoNextButtonUi()
                 addressBar.setText(url)
                 updateFavoriteButtonState(url)
@@ -261,7 +370,7 @@ class MainActivity : Activity() {
                 updateFavoriteButtonState(url)
                 updateBackButtonVisual()
                 updateBlockedCounterUi()
-                statusBar.text = "🛡️ Kalkan Aktif • OK Basılı Tut: İmleci Aç/Kapat • En alta inince sayfa kayar"
+                statusBar.text = "🛡️ Kalkan Aktif • OK Basılı Tut: İmleç Aç/Kapat • En alta inince sayfa kayar"
 
                 val pageTitle = view.title?.trim().orEmpty()
                 if (shouldRecordPageInHistory(url)) {
@@ -275,6 +384,7 @@ class MainActivity : Activity() {
             override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
                 super.doUpdateVisitedHistory(view, url, isReload)
                 if (!isReload && shouldRecordPageInHistory(url)) {
+                    isNetflixCountdownCancelledForCurrentPage = false
                     val pageTitle = view.title?.trim().orEmpty()
                     recordHistoryAsync(url, pageTitle.ifBlank { url }, -1L)
                 }
@@ -335,9 +445,12 @@ class MainActivity : Activity() {
                 if (isSafeWebUrl(currentUrl)) {
                     recordHistoryAsync(currentUrl, web.title?.trim().orEmpty().ifBlank { currentUrl }, -1L)
                 }
+                // Tam ekranda Netflix kartı ve İmleç her zaman videonun üst katmanında kalsın
+                netflixNextCard.bringToFront()
                 cursorOverlay.bringToFront()
+                floatingCursorHint.bringToFront()
                 cursorOverlay.hideCursorImmediately()
-                showFloatingCursorBanner("🎬 Tam Ekran • İmleci Açmak/Kapatmak için OK tuşuna basılı tutun")
+                showFloatingCursorBanner("🎬 Tam Ekran • OK Basınca Sonraki Bölüm Kartı Çıkar • OK Basılı Tut: İmleç")
             }
 
             override fun onHideCustomView() {
@@ -349,6 +462,7 @@ class MainActivity : Activity() {
                 customViewCallback = null
                 topBar.visibility = View.VISIBLE
                 bottomBar.visibility = View.VISIBLE
+                netflixNextCard.bringToFront()
                 cursorOverlay.bringToFront()
             }
 
@@ -382,10 +496,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /**
-     * İmleç yukarı çıktığında her zaman adres çubuğuna gitmek yerine,
-     * imlecin yatay (X) konumuna göre tam hizasındaki üst menü butonunu seçer!
-     */
     private fun focusTopBarElementAtCursorX(cursorX: Float) {
         val candidates = listOf<View>(
             backButton,
@@ -432,12 +542,8 @@ class MainActivity : Activity() {
         uiHandler.postDelayed(hideHintRunnable, 4000L)
     }
 
-    /**
-     * Sitede "Sonraki Bölüm" butonu varsa üst bardaki Oto-Bölüm butonunu görünür ve aktif yapar.
-     * Sitede sonraki bölüm işlevi yoksa butonu tamamen gizler/pasif tutar.
-     */
     private fun updateAutoNextButtonUi() {
-        val hasNextEpisodeOnSite = detectedNextEpisodeUrl.isNotBlank() || detectedNextEpisodeLabel.isNotBlank()
+        val hasNextEpisodeOnSite = hasDetectedNextEpisode()
         if (!hasNextEpisodeOnSite || currentScreen != ScreenState.WEB) {
             autoNextButton.visibility = View.GONE
             return
@@ -454,8 +560,7 @@ class MainActivity : Activity() {
     }
 
     private fun toggleAutoNextEpisodeMode() {
-        val hasNextEpisodeOnSite = detectedNextEpisodeUrl.isNotBlank() || detectedNextEpisodeLabel.isNotBlank()
-        if (!hasNextEpisodeOnSite) {
+        if (!hasDetectedNextEpisode()) {
             Toast.makeText(
                 this,
                 "Bu sayfada 'Sonraki Bölüm' butonu tespit edilemediği için bu özellik pasiftir.",
@@ -465,6 +570,9 @@ class MainActivity : Activity() {
         }
 
         isAutoNextEnabled = !isAutoNextEnabled
+        if (!isAutoNextEnabled) {
+            stopNetflixCountdown(cancelledByUser = false)
+        }
         getSharedPreferences("dizi_settings", Context.MODE_PRIVATE)
             .edit()
             .putBoolean("auto_next_enabled", isAutoNextEnabled)
@@ -472,7 +580,7 @@ class MainActivity : Activity() {
 
         updateAutoNextButtonUi()
         val msg = if (isAutoNextEnabled) {
-            "⏭️ Otomatik Sonraki Bölüm: AÇIK (Bölüm bitince otomatik geçer ve başlatır)"
+            "⏭️ Netflix Tarzı Sonraki Bölüm: AÇIK (Bölüm sonunda geri sayımla otomatik geçer)"
         } else {
             "⏭️ Otomatik Sonraki Bölüm: KAPALI"
         }
@@ -496,8 +604,7 @@ class MainActivity : Activity() {
             toggleAutoNextEpisodeMode()
         }
         autoNextButton.setOnLongClickListener {
-            // Uzun basılırsa hemen sonraki bölüme manuel geçiş yap
-            if (detectedNextEpisodeUrl.isNotBlank()) {
+            if (hasDetectedNextEpisode()) {
                 triggerTransitionToNextEpisode()
             }
             true
@@ -527,20 +634,19 @@ class MainActivity : Activity() {
     }
 
     private fun triggerTransitionToNextEpisode() {
-        if (!isAutoNextEnabled) return
         val nextUrl = detectedNextEpisodeUrl
         runOnUiThread {
+            stopNetflixCountdown(cancelledByUser = false)
             if (customFullscreenView != null) {
                 web.webChromeClient?.onHideCustomView()
             }
             shouldAutoStartVideoAfterNextTransition = true
             if (nextUrl.isNotBlank() && isSafeWebUrl(nextUrl)) {
-                showFloatingCursorBanner("⏭️ Sonraki bölüme otomatik geçiliyor...")
+                showFloatingCursorBanner("⏭️ Sonraki bölüme geçiliyor ve otomatik başlatılıyor...")
                 statusBar.text = "⏭️ Sonraki bölüm açılıyor: $nextUrl"
                 addressBar.setText(nextUrl)
                 web.loadUrl(nextUrl)
             } else {
-                // JS üzerinden sitedeki sonraki bölüm butonuna tıkla
                 showFloatingCursorBanner("⏭️ Sonraki bölüm butonuna tıklanıyor...")
                 web.evaluateJavascript(
                     "if (window.__diziClickNextEpisode) window.__diziClickNextEpisode();",
@@ -738,6 +844,7 @@ class MainActivity : Activity() {
 
     private fun showHome() {
         currentScreen = ScreenState.HOME
+        stopNetflixCountdown(cancelledByUser = false)
         updateBackButtonVisual()
         updateAutoNextButtonUi()
         cursorOverlay.visibility = View.GONE
@@ -754,7 +861,6 @@ class MainActivity : Activity() {
             setPadding(40, 24, 40, 32)
         }
 
-        // Başlık ve Özet Kartı
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -802,7 +908,6 @@ class MainActivity : Activity() {
         headerRow.addView(qrQuickBtn)
         rootPanel.addView(headerRow)
 
-        // 1. FAVORİ SİTELER BÖLÜMÜ
         val favHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -859,7 +964,6 @@ class MainActivity : Activity() {
         favScroll.addView(favRow)
         rootPanel.addView(favScroll)
 
-        // 2. SON İZLENEN BÖLÜMLER (10 GÜNLÜK GEÇMİŞ & KALDIĞI YERDEN DEVAM)
         rootPanel.addView(TextView(this).apply {
             text = "🕘 SON İZLENEN BÖLÜMLER & SAYFALAR (10 GÜN SAKLANIR)"
             textSize = 16f
@@ -942,6 +1046,7 @@ class MainActivity : Activity() {
 
     private fun showHistory() {
         currentScreen = ScreenState.HISTORY
+        stopNetflixCountdown(cancelledByUser = false)
         updateBackButtonVisual()
         updateAutoNextButtonUi()
         cursorOverlay.visibility = View.GONE
@@ -1021,7 +1126,6 @@ class MainActivity : Activity() {
     }
 
     private fun injectPageEnhancements() {
-        // 1. Kozmetik reklam gizleyici CSS + İmleç kapalıyken odaklanan (focus) nesneleri parlak çerçeve içine alma
         web.evaluateJavascript(AdBlocker.getCosmeticHideJs(), null)
 
         val focusAndPlayerHelperJs = """
@@ -1045,7 +1149,6 @@ class MainActivity : Activity() {
         """.trimIndent()
         web.evaluateJavascript(focusAndPlayerHelperJs, null)
 
-        // 2. Eğer önceki bölümden otomatik geçiş yapıldıysa yeni bölümdeki videoyu otomatik başlat
         if (shouldAutoStartVideoAfterNextTransition) {
             shouldAutoStartVideoAfterNextTransition = false
             web.evaluateJavascript(
@@ -1073,11 +1176,9 @@ class MainActivity : Activity() {
             )
         }
 
-        // 3. Sitede "Sonraki Bölüm" butonu/linki var mı tespit et ve video bittiğinde otomatik geç
         val savedResumeSec = (history.getResumePosition(web.url ?: "", "") / 1000L)
         val trackerAndNextEpisodeJs = """
             (function() {
-                // Sitedeki Sonraki Bölüm butonunu bulan akıllı tarayıcı
                 function findNextEpisodeElement() {
                     var keywords = [
                         'sonraki bölüm', 'sonraki bolum', 'gelecek bölüm', 'sıradaki bölüm',
@@ -1101,7 +1202,6 @@ class MainActivity : Activity() {
                         }
                     }
 
-                    // URL içinde bolum-3 / episode-3 gibi numara varsa sayfada bolum-4 linki var mı bak
                     var loc = location.href;
                     var m = loc.match(/(bolum|episode|ep|part)([-_\/])(\d+)/i);
                     if (m) {
@@ -1148,7 +1248,7 @@ class MainActivity : Activity() {
                 var resumeTarget = $savedResumeSec;
                 var resumeApplied = false;
                 var wasPlaying = false;
-                var nextTriggered = false;
+                var countdownRequested = false;
 
                 setInterval(function() {
                     try {
@@ -1160,9 +1260,9 @@ class MainActivity : Activity() {
                             if (!v.__diziEndedBound) {
                                 v.__diziEndedBound = true;
                                 v.addEventListener('ended', function() {
-                                    if (!nextTriggered && v.duration > 120) {
-                                        nextTriggered = true;
-                                        DiziBridge.onEpisodeEnded();
+                                    if (!countdownRequested && v.duration > 120) {
+                                        countdownRequested = true;
+                                        DiziBridge.onStartNetflixCountdown(5);
                                     }
                                 });
                             }
@@ -1179,10 +1279,11 @@ class MainActivity : Activity() {
                                 } else if (tickCount % 6 === 0) {
                                     DiziBridge.videoProgress(location.href, Math.floor(v.currentTime * 1000));
                                 }
-                                // Bölümün bitmesine 3 saniyeden az kaldıysa ve en az 5 dakikalık bir bölümse
-                                if (!nextTriggered && v.duration > 300 && (v.duration - v.currentTime) <= 3) {
-                                    nextTriggered = true;
-                                    DiziBridge.onEpisodeEnded();
+                                // Bölümün bitmesine 15 saniye veya daha az kaldıysa Netflix geri sayım kartını ekrana çıkar!
+                                if (!countdownRequested && v.duration > 240 && (v.duration - v.currentTime) <= 15) {
+                                    countdownRequested = true;
+                                    var rem = Math.max(4, Math.floor(v.duration - v.currentTime));
+                                    DiziBridge.onStartNetflixCountdown(rem);
                                 }
                             }
                         }
@@ -1193,7 +1294,7 @@ class MainActivity : Activity() {
                             wasPlaying = false;
                         }
                     } catch (e) {}
-                }, 5000);
+                }, 4000);
             })();
         """.trimIndent()
         web.evaluateJavascript(trackerAndNextEpisodeJs, null)
@@ -1239,12 +1340,9 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
-        fun onEpisodeEnded() {
+        fun onStartNetflixCountdown(secondsRemaining: Int) {
             runOnUiThread {
-                val hasNext = detectedNextEpisodeUrl.isNotBlank() || detectedNextEpisodeLabel.isNotBlank()
-                if (isAutoNextEnabled && hasNext) {
-                    triggerTransitionToNextEpisode()
-                }
+                startNetflixCountdown(secondsRemaining)
             }
         }
     }
@@ -1252,7 +1350,18 @@ class MainActivity : Activity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val isOkKey = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER
 
-        // Web ekranındayken OK tuşu hem kısa basma (Tıkla) hem de 1 sn basılı tutma (İmleci Aç/Kapat) için tamamen burada yönetilir.
+        // Eğer Netflix tarzı Sonraki Bölüm kartı odaklanmışsa veya geri sayım çalışıyorsa:
+        if (netflixNextCard.visibility == View.VISIBLE && netflixNextCard.hasFocus()) {
+            return super.dispatchKeyEvent(event)
+        }
+
+        // Geri sayım aktifken odak kartta olmasa bile kısa OK tuşuna basılırsa hemen sonraki bölüme geç!
+        if (isNetflixCountdownRunning && isOkKey && event.action == KeyEvent.ACTION_UP && !okLongPressConsumed) {
+            triggerTransitionToNextEpisode()
+            return true
+        }
+
+        // Web ekranındayken OK tuşu hem kısa basma (Tıkla + Netflix Sonraki Bölüm Kartını Göster) hem de 1 sn basılı tutma (İmleci Aç/Kapat)
         if (currentScreen == ScreenState.WEB && !topBar.hasFocus() && isOkKey) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) {
@@ -1267,6 +1376,27 @@ class MainActivity : Activity() {
                     okLongPressConsumed = false
                     return true
                 }
+
+                // Tam ekranda veya video izlerken OK tuşuna basıldığında, sitede sonraki bölüm varsa
+                // sağ altta Netflix tarzı "Sonraki Bölüme Geç" kartını da çıkar!
+                if (customFullscreenView != null || !cursorOverlay.isCursorEnabled) {
+                    showNetflixNextEpisodePeek()
+                }
+
+                // Eğer imleç sağ alttaki Netflix kartının üzerindeyse ve OK'a basıldıysa doğrudan sonraki bölüme geç
+                if (netflixNextCard.visibility == View.VISIBLE && cursorOverlay.isCursorEnabled) {
+                    val loc = IntArray(2)
+                    netflixNextCard.getLocationOnScreen(loc)
+                    val cx = cursorOverlay.cursorX
+                    val cy = cursorOverlay.cursorY
+                    if (cx in loc[0].toFloat()..(loc[0] + netflixNextCard.width).toFloat() &&
+                        cy in loc[1].toFloat()..(loc[1] + netflixNextCard.height).toFloat()
+                    ) {
+                        triggerTransitionToNextEpisode()
+                        return true
+                    }
+                }
+
                 val activeTarget = customFullscreenView ?: web
                 if (cursorOverlay.isCursorEnabled) {
                     cursorOverlay.performClickOnTarget(activeTarget, web)
@@ -1302,20 +1432,20 @@ class MainActivity : Activity() {
                     }
                     KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
                         web.evaluateJavascript(
-                            "(function(){var v=document.querySelector('video');if(v){v.currentTime+=10;})()",
+                            "(function(){var v=document.querySelector('video');if(v)v.currentTime+=10;})()",
                             null
                         )
                         return true
                     }
                     KeyEvent.KEYCODE_MEDIA_REWIND -> {
                         web.evaluateJavascript(
-                            "(function(){var v=document.querySelector('video');if(v){v.currentTime=Math.max(0,v.currentTime-10);})()",
+                            "(function(){var v=document.querySelector('video');if(v)v.currentTime=Math.max(0,v.currentTime-10);})()",
                             null
                         )
                         return true
                     }
                     KeyEvent.KEYCODE_MEDIA_NEXT -> {
-                        if (detectedNextEpisodeUrl.isNotBlank() || detectedNextEpisodeLabel.isNotBlank()) {
+                        if (hasDetectedNextEpisode()) {
                             triggerTransitionToNextEpisode()
                             return true
                         }
@@ -1330,7 +1460,14 @@ class MainActivity : Activity() {
                 }
             }
 
-            // Üst çubukta iken AŞAĞI basıldığında hemen web sayfasındaki imlece (veya sayfaya) in
+            // İmleç kapalıyken sağ altta Netflix kartı görünürse SAĞ veya AŞAĞI tuşuna basınca karta odaklanabilsin
+            if (currentScreen == ScreenState.WEB && !cursorOverlay.isCursorEnabled && netflixNextCard.visibility == View.VISIBLE && !netflixNextCard.hasFocus()) {
+                if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT || event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    netflixPlayNextBtn.requestFocus()
+                    return true
+                }
+            }
+
             if (currentScreen == ScreenState.WEB && topBar.hasFocus() && event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
                 if (cursorOverlay.isCursorEnabled) {
                     activateWebCursorNow()
@@ -1342,7 +1479,6 @@ class MainActivity : Activity() {
                 }
             }
 
-            // Web ekranında ve üst bar odaklanmamışken Sanal Kumanda İmleci kontrolü
             if (currentScreen == ScreenState.WEB && cursorOverlay.isCursorEnabled && !topBar.hasFocus()) {
                 val activeTarget = customFullscreenView ?: web
                 when (event.keyCode) {
@@ -1372,6 +1508,10 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        if (isNetflixCountdownRunning || netflixNextCard.visibility == View.VISIBLE) {
+            stopNetflixCountdown(cancelledByUser = true)
+            return
+        }
         if (customFullscreenView != null) {
             web.webChromeClient?.onHideCustomView()
             return

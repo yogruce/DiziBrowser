@@ -38,7 +38,7 @@ class CursorOverlayView @JvmOverloads constructor(
     var cursorY: Float = 320f
         private set
 
-    private var stepSize = 22f
+    private var stepSize = 16f
     private var lastMoveTime = 0L
     private var isCursorVisible = true
 
@@ -118,22 +118,25 @@ class CursorOverlayView @JvmOverloads constructor(
         wakeUpCursor()
 
         val now = SystemClock.uptimeMillis()
-        stepSize = if (now - lastMoveTime < 190) {
-            min(stepSize + 5f, 56f)
+        stepSize = if (now - lastMoveTime < 180) {
+            min(stepSize + 3.0f, 34f)
         } else {
-            20f
+            15f
         }
         lastMoveTime = now
 
-        val topEdgeThreshold = 55f
-        val bottomEdgeThreshold = (height - 75).coerceAtLeast(120).toFloat()
+        val topEdgeThreshold = 42f
+        val bottomEdgeThreshold = (height - 48).coerceAtLeast(120).toFloat()
+
+        // Tek basışta çok ince (1 metin satırı = 28px), basılı tutulduğunda ise 40px kaydır
+        val scrollDelta = if (stepSize > 22f) 40 else 28
 
         when (keyCode) {
             KeyEvent.KEYCODE_DPAD_UP -> {
                 if (cursorY <= topEdgeThreshold) {
-                    // Sayfa aşağı kaymış durumdaysa önce sayfayı yukarı kaydır, en tepeye gelince üst menüye çık
+                    // Sayfa aşağı kaymış durumdaysa önce sayfayı 1 satır yukarı kaydır, en tepeye gelince üst menüye çık
                     if (webView != null) {
-                        scrollWebPageAndCheckTop(webView, -280, onReachTopEdge)
+                        scrollWebPageAndCheckTop(webView, -scrollDelta, onReachTopEdge)
                     } else {
                         onReachTopEdge()
                     }
@@ -145,11 +148,11 @@ class CursorOverlayView @JvmOverloads constructor(
             }
             KeyEvent.KEYCODE_DPAD_DOWN -> {
                 if (cursorY >= bottomEdgeThreshold) {
-                    // Ekranın alt sınırına gelindiğinde sayfayı her türlü aşağı kaydır!
+                    // Ekranın alt sınırına gelindiğinde sayfayı 1 satır (28px) aşağı kaydır
                     if (webView != null) {
-                        scrollWebPage(targetView ?: webView, webView, 280)
+                        scrollWebPage(targetView ?: webView, webView, scrollDelta)
                     } else {
-                        targetView?.scrollBy(0, 280)
+                        targetView?.scrollBy(0, scrollDelta)
                     }
                 } else {
                     cursorY = min((height - 16).toFloat(), cursorY + stepSize)
@@ -171,66 +174,48 @@ class CursorOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Tüm web sitelerinde (hem klasik body scroll hem de iç div/overflow-y:auto kullanan modern sitelerde)
-     * %100 çalışan çok katmanlı aşağı/yukarı kaydırma motoru.
+     * Tüm web sitelerinde CSS scroll-snap veya smooth-scroll kaynaklı tam sayfa zıplamalarını devre dışı bırakarak
+     * her tuş basışında milimetrik olarak yalnızca 1 satır (deltaY piksel, örn. 28px) kaydıran motor.
      */
     private fun scrollWebPage(targetView: View, webView: WebView, deltaY: Int) {
-        // 1. Native Android Mouse Wheel (Tekerlek) sinyali gönder (Chrome WebView içindeki tüm kaydırılabilir alanları tetikler)
-        val now = SystemClock.uptimeMillis()
-        val pointerProps = arrayOf(MotionEvent.PointerProperties().apply {
-            id = 0
-            toolType = MotionEvent.TOOL_TYPE_MOUSE
-        })
-        val pointerCoords = arrayOf(MotionEvent.PointerCoords().apply {
-            x = cursorX
-            y = cursorY
-            setAxisValue(MotionEvent.AXIS_VSCROLL, if (deltaY > 0) -1.8f else 1.8f)
-        })
-        val scrollEvent = MotionEvent.obtain(
-            now, now,
-            MotionEvent.ACTION_SCROLL,
-            1, pointerProps, pointerCoords,
-            0, 0, 1f, 1f, 0, 0,
-            InputDevice.SOURCE_MOUSE, 0
-        )
-        targetView.dispatchGenericMotionEvent(scrollEvent)
-        scrollEvent.recycle()
-
-        // 2. Native WebView pageDown / scrollBy
-        if (deltaY > 0) {
-            webView.scrollBy(0, deltaY / 2)
-        } else {
-            val nextY = (webView.scrollY + deltaY / 2).coerceAtLeast(0)
-            webView.scrollTo(webView.scrollX, nextY)
-        }
-
-        // 3. JavaScript ile imlecin altındaki kaydırılabilir kapsayıcıyı (container) veya ana pencereyi kaydır
         val normX = if (width > 0) (cursorX / width.toFloat()).coerceIn(0f, 1f) else 0.5f
         val normY = if (height > 0) (cursorY / height.toFloat()).coerceIn(0f, 1f) else 0.5f
         webView.evaluateJavascript(
             """
             (function() {
                 try {
+                    if (!document.getElementById('__dizi_no_snap_scroll')) {
+                        var st = document.createElement('style');
+                        st.id = '__dizi_no_snap_scroll';
+                        st.innerHTML = 'html, body, * { scroll-behavior: auto !important; scroll-snap-type: none !important; }';
+                        if (document.head) document.head.appendChild(st);
+                    }
                     var dy = $deltaY;
-                    window.scrollBy(0, dy);
-                    if (document.scrollingElement) {
-                        document.scrollingElement.scrollTop += dy;
-                    }
-                    document.documentElement.scrollTop += dy;
-                    if (document.body) {
-                        document.body.scrollTop += dy;
-                    }
                     var x = Math.floor(window.innerWidth * $normX);
                     var y = Math.floor(window.innerHeight * $normY);
                     var el = document.elementFromPoint(x, y);
+                    var scrolledInner = false;
                     while (el && el !== document.body && el !== document.documentElement) {
                         var style = window.getComputedStyle(el);
                         var overflowY = style ? style.overflowY : '';
-                        if ((overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') && el.scrollHeight > el.clientHeight) {
-                            el.scrollTop += dy;
-                            break;
+                        if ((overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') && el.scrollHeight > el.clientHeight + 8) {
+                            var prev = el.scrollTop;
+                            el.scrollTop = prev + dy;
+                            if (Math.abs(el.scrollTop - prev) > 0.5) {
+                                scrolledInner = true;
+                                break;
+                            }
                         }
                         el = el.parentElement;
+                    }
+                    if (!scrolledInner) {
+                        var scroller = document.scrollingElement || document.documentElement || document.body;
+                        var prevTop = window.pageYOffset || scroller.scrollTop || 0;
+                        window.scrollTo({ top: Math.max(0, prevTop + dy), behavior: 'instant' });
+                        var afterTop = window.pageYOffset || scroller.scrollTop || 0;
+                        if (Math.abs(afterTop - prevTop) < 0.5) {
+                            scroller.scrollTop = Math.max(0, prevTop + dy);
+                        }
                     }
                 } catch(e) {}
             })();

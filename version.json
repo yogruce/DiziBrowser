@@ -1,6 +1,6 @@
 {
-  "versionCode": 10,
-  "versionName": "1.6.1",
+  "versionCode": 12,
+  "versionName": "1.6.3",
   "apkUrl": "https://raw.githubusercontent.com/yogruce/DiziBrowser/main/DiziBrowser-TV-v1.0.apk",
-  "changelog": "• Sonraki Bölüm Erken Geçiş Hatası Düzeltildi (v1.6.1): Bölüm yeni başladığında veya reklam/fragman geçişlerinde yanlışlıkla sonraki bölüme atlama sorunu giderildi.\n• Yalnızca en az 15 dakikalık gerçek bölümlerde, bölümün %92'si izlendikten sonra son 15 saniyede geri sayım başlar.\n• Kumandadan herhangi bir yön veya Geri tuşuna basıldığında otomatik dokunuşlar anında durur, tam kullanıcı kontrolü sağlandı."
+  "changelog": "• Kumanda Kaydırma (Scroll) ve Odak Sıçraması Düzeltildi (v1.6.3): WebView'e sızan D-Pad ACTION_UP odak zıplaması (Page Down etkisi) tamamen kapatıldı.\n• Her aşağı/yukarı basışta milimetrik tek satır (28px) kaydırma sağlandı ve CSS scroll-snap zıplamaları devre dışı bırakıldı."
 }

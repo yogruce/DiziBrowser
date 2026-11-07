@@ -74,6 +74,7 @@ class MainActivity : Activity() {
     private lateinit var homeButton: Button
     private lateinit var goButton: Button
     private lateinit var autoNextButton: Button
+    private lateinit var watchPartyButton: Button
     private lateinit var historyButton: Button
     private lateinit var qrButton: Button
     private lateinit var updateButton: Button
@@ -84,6 +85,10 @@ class MainActivity : Activity() {
     private lateinit var favButton: Button
 
     private lateinit var history: WatchHistory
+    private lateinit var watchPartyManager: WatchPartyManager
+    private var isNavigatingFromWatchParty = false
+    private var lastKnownPlaybackPosSec = 0.0
+    private var lastKnownIsPlaying = false
     private var remoteServer: RemoteWebServer? = null
 
     private val historyIoExecutor = Executors.newSingleThreadExecutor()
@@ -204,6 +209,7 @@ class MainActivity : Activity() {
         homeButton = findViewById(R.id.homeButton)
         goButton = findViewById(R.id.goButton)
         autoNextButton = findViewById(R.id.autoNextButton)
+        watchPartyButton = findViewById(R.id.watchPartyButton)
         historyButton = findViewById(R.id.historyButton)
         qrButton = findViewById(R.id.qrButton)
         updateButton = findViewById(R.id.updateButton)
@@ -213,6 +219,7 @@ class MainActivity : Activity() {
         cursorButton = findViewById(R.id.cursorButton)
         favButton = findViewById(R.id.favButton)
 
+        setupWatchParty()
         setupWebView()
         setupTopBarButtons()
         setupNetflixCardButtons()
@@ -312,7 +319,15 @@ class MainActivity : Activity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
-        web = WebView(this).apply {
+        web = object : WebView(this) {
+            override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                // WebView'in kendi başına D-Pad YUKARI/AŞAĞI tuşlarıyla odak zıplaması (spatial navigation / page down) yapmasını tamamen engelle!
+                if (event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN || event.keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                    return true
+                }
+                return super.dispatchKeyEvent(event)
+            }
+        }.apply {
             isFocusable = true
             isFocusableInTouchMode = true
             setLayerType(View.LAYER_TYPE_HARDWARE, null)
@@ -427,6 +442,20 @@ class MainActivity : Activity() {
                 val pageTitle = view.title?.trim().orEmpty()
                 if (shouldRecordPageInHistory(url)) {
                     recordHistoryAsync(url, pageTitle.ifBlank { url }, -1L)
+                }
+
+                if (watchPartyManager.isActive && shouldRecordPageInHistory(url)) {
+                    if (isNavigatingFromWatchParty) {
+                        isNavigatingFromWatchParty = false
+                    } else {
+                        watchPartyManager.publishEvent(
+                            action = "URL_CHANGE",
+                            episodeUrl = url,
+                            isPlaying = false,
+                            positionSec = 0.0,
+                            force = true
+                        )
+                    }
                 }
 
                 injectPageEnhancements()
@@ -568,6 +597,7 @@ class MainActivity : Activity() {
             goButton,
             cursorButton,
             autoNextButton,
+            watchPartyButton,
             favButton,
             historyButton,
             qrButton,
@@ -604,6 +634,196 @@ class MainActivity : Activity() {
         floatingCursorHint.bringToFront()
         uiHandler.removeCallbacks(hideHintRunnable)
         uiHandler.postDelayed(hideHintRunnable, 4000L)
+    }
+
+    private fun setupWatchParty() {
+        watchPartyManager = WatchPartyManager(object : WatchPartyManager.Listener {
+            override fun onRoomStatusChanged(isActive: Boolean, roomCode: String, statusText: String) {
+                if (isActive) {
+                    watchPartyButton.text = "👥 Oda: $roomCode"
+                    watchPartyButton.setTextColor(Color.parseColor("#7EE787"))
+                } else {
+                    watchPartyButton.text = "👥 Birlikte İzle"
+                    watchPartyButton.setTextColor(Color.parseColor("#D2A8FF"))
+                }
+                statusBar.text = statusText
+                showFloatingCursorBanner(statusText)
+            }
+
+            override fun onRemoteNavigateToUrl(url: String, senderId: String) {
+                if (!isSafeWebUrl(url) || !shouldRecordPageInHistory(url)) return
+                val currentUrl = if (currentScreen == ScreenState.WEB) (web.url ?: "") else ""
+                val cleanRemote = url.trimEnd('/', '#')
+                val cleanCurrent = currentUrl.trimEnd('/', '#')
+
+                if (cleanRemote.isNotEmpty() && !cleanRemote.equals(cleanCurrent, ignoreCase = true)) {
+                    isNavigatingFromWatchParty = true
+                    if (customFullscreenView != null) {
+                        web.webChromeClient?.onHideCustomView()
+                    }
+                    addressBar.setText(url)
+                    navigateFromAddress()
+                    showFloatingCursorBanner("👥 Birlikte İzle: Arkadaşınızın açtığı bölüm yükleniyor...")
+                }
+            }
+
+            override fun onRemotePlaybackTrigger(action: String, positionSec: Double, isPlaying: Boolean) {
+                val mins = (positionSec.toInt()) / 60
+                val secs = (positionSec.toInt()) % 60
+                val timeStr = "%02d:%02d".format(mins, secs)
+
+                when (action) {
+                    "PAUSE" -> showFloatingCursorBanner("👥 Birlikte İzle: Video duraklatıldı ($timeStr)")
+                    "PLAY" -> showFloatingCursorBanner("👥 Birlikte İzle: Video başlatıldı ($timeStr)")
+                    "SEEK" -> showFloatingCursorBanner("👥 Birlikte İzle: Video $timeStr konumuna sarıldı")
+                }
+            }
+
+            override fun onNewMemberJoinedRoom() {
+                showFloatingCursorBanner("👥 Arkadaşınız odaya katıldı! Mevcut bölüm ve saniye eşitleniyor...")
+                val curUrl = if (currentScreen == ScreenState.WEB) (web.url ?: "") else ""
+                if (isSafeWebUrl(curUrl) && shouldRecordPageInHistory(curUrl)) {
+                    watchPartyManager.publishEvent(
+                        action = "STATE_SYNC",
+                        episodeUrl = curUrl,
+                        isPlaying = lastKnownIsPlaying,
+                        positionSec = lastKnownPlaybackPosSec,
+                        force = true
+                    )
+                }
+            }
+        })
+    }
+
+    private fun showWatchPartyDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(44, 32, 44, 24)
+            setBackgroundColor(Color.parseColor("#161B22"))
+        }
+
+        val titleView = TextView(this).apply {
+            text = "👥 BİRLİKTE İZLE (WATCH PARTY)"
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.parseColor("#D2A8FF"))
+        }
+        container.addView(titleView)
+
+        val descView = TextView(this).apply {
+            text = if (watchPartyManager.isActive) {
+                "🟢 Aktif Oda Kodu: ${watchPartyManager.roomCode}\n\n" +
+                    "Farklı mekanlardaki arkadaşlarınız uygulamadaki '👥 Birlikte İzle' menüsünden (veya PC eklentisinden) bu kodu girerek aynı bölümü sizinle senkronize izleyebilir."
+            } else {
+                "Farklı evlerde / farklı bilgisayarlarda veya TV'lerde internet üzerinden aynı dizi bölümünü saniyesi saniyesine senkronize izleyin.\n\n" +
+                    "• Bir kişi videoyu duraklattığında, başlattığında veya sardığında herkesin ekranında otomatik eşitlenir."
+            }
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 12, 0, 18)
+        }
+        container.addView(descView)
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(container)
+            .create()
+
+        if (watchPartyManager.isActive) {
+            container.addView(Button(this).apply {
+                text = "🔄 Şu Anki Bölüm ve Saniyeyi Herkese Eşitle"
+                textSize = 13f
+                isAllCaps = false
+                setTextColor(Color.WHITE)
+                setBackgroundResource(R.drawable.tv_button_bg)
+                setPadding(24, 14, 24, 14)
+                setOnClickListener {
+                    val curUrl = if (currentScreen == ScreenState.WEB) (web.url ?: "") else ""
+                    watchPartyManager.publishEvent(
+                        action = "STATE_SYNC",
+                        episodeUrl = curUrl,
+                        isPlaying = lastKnownIsPlaying,
+                        positionSec = lastKnownPlaybackPosSec,
+                        force = true
+                    )
+                    showFloatingCursorBanner("👥 Mevcut sahne ve saniye odaya gönderildi!")
+                    dialog.dismiss()
+                }
+            }, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 6, 0, 10) })
+
+            container.addView(Button(this).apply {
+                text = "🚪 Odadan Ayrıl (Senkronizasyonu Kapat)"
+                textSize = 13f
+                isAllCaps = false
+                setTextColor(Color.parseColor("#FF7B72"))
+                setBackgroundResource(R.drawable.tv_button_bg)
+                setPadding(24, 14, 24, 14)
+                setOnClickListener {
+                    watchPartyManager.leaveRoom()
+                    dialog.dismiss()
+                }
+            }, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 10) })
+        } else {
+            val createBtn = Button(this).apply {
+                text = "➕ Yeni Oda Kur (5 Haneli Kod Oluştur)"
+                textSize = 14f
+                isAllCaps = false
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.parseColor("#7EE787"))
+                setBackgroundResource(R.drawable.tv_button_bg)
+                setPadding(24, 14, 24, 14)
+                setOnClickListener {
+                    val curUrl = if (currentScreen == ScreenState.WEB) (web.url ?: "") else ""
+                    val code = watchPartyManager.createNewRoom(curUrl)
+                    dialog.dismiss()
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("🎉 Watch Party Odası Kuruldu!")
+                        .setMessage("Oda Kodunuz:  $code\n\nArkadaşınız kendi cihazında '👥 Birlikte İzle' butonuna basıp '$code' kodunu girdiğinde otomatik olarak açtığınız bölüme ve saniyeye bağlanacaktır.")
+                        .setPositiveButton("Tamam", null)
+                        .show()
+                }
+            }
+            container.addView(createBtn, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 4, 0, 16) })
+
+            val codeInput = EditText(this).apply {
+                hint = "Arkadaşınızın Oda Kodunu Girin (Örn: 48291)"
+                setSingleLine(true)
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.GRAY)
+                setBackgroundResource(R.drawable.tv_button_bg)
+                setPadding(20, 14, 20, 14)
+            }
+            container.addView(codeInput, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 10) })
+
+            container.addView(Button(this).apply {
+                text = "🔗 Bu Koda Katıl ve Senkronize Başla"
+                textSize = 14f
+                isAllCaps = false
+                setTextColor(Color.parseColor("#00E5FF"))
+                setBackgroundResource(R.drawable.tv_button_bg)
+                setPadding(24, 14, 24, 14)
+                setOnClickListener {
+                    val entered = codeInput.text.toString().trim()
+                    if (entered.length < 4) {
+                        Toast.makeText(this@MainActivity, "Lütfen en az 4 haneli oda kodunu girin", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    watchPartyManager.joinRoom(entered, isCreator = false)
+                    dialog.dismiss()
+                }
+            }, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 10) })
+        }
+
+        container.addView(Button(this).apply {
+            text = "Kapat"
+            textSize = 12f
+            isAllCaps = false
+            setTextColor(Color.LTGRAY)
+            setBackgroundResource(R.drawable.tv_button_bg)
+            setOnClickListener { dialog.dismiss() }
+        }, LinearLayout.LayoutParams(-1, -2))
+
+        dialog.show()
     }
 
     private fun updateAutoNextButtonUi() {
@@ -672,6 +892,10 @@ class MainActivity : Activity() {
                 triggerTransitionToNextEpisode()
             }
             true
+        }
+
+        watchPartyButton.setOnClickListener {
+            showWatchPartyDialog()
         }
 
         favButton.setOnClickListener {
@@ -1481,6 +1705,85 @@ class MainActivity : Activity() {
                 var wasPlaying = false;
                 var countdownRequested = false;
                 var autoFsTriggeredInFrame = false;
+                var lastAppliedWpSeq = 0;
+                var suppressWpLocalEventsUntil = 0;
+
+                // 7) Watch Party (Birlikte İzle) Gerçek Zamanlı Video Senkronizasyonu (Cross-Origin Iframe Dahil!)
+                function bindWatchPartyToVideo(v) {
+                    if (v.__diziWpBound) return;
+                    v.__diziWpBound = true;
+
+                    v.addEventListener('play', function() {
+                        if (Date.now() > suppressWpLocalEventsUntil && v.currentTime > 0.5) {
+                            try {
+                                DiziBridge.onLocalWatchPartyVideoEvent('PLAY', v.currentTime, true);
+                            } catch(e) {}
+                        }
+                    });
+
+                    v.addEventListener('pause', function() {
+                        if (Date.now() > suppressWpLocalEventsUntil && !v.ended && v.currentTime > 0.5) {
+                            try {
+                                DiziBridge.onLocalWatchPartyVideoEvent('PAUSE', v.currentTime, false);
+                            } catch(e) {}
+                        }
+                    });
+
+                    v.addEventListener('seeked', function() {
+                        if (Date.now() > suppressWpLocalEventsUntil && v.currentTime > 0.5) {
+                            try {
+                                DiziBridge.onLocalWatchPartyVideoEvent('SEEK', v.currentTime, !v.paused);
+                            } catch(e) {}
+                        }
+                    });
+                }
+
+                // Her 900ms'de bir Watch Party hedef durumunu kontrol edip videoyu milimetrik hizalar
+                setInterval(function() {
+                    try {
+                        if (!window.DiziBridge || !DiziBridge.getWatchPartyTargetStateJson) return;
+                        var rawWp = DiziBridge.getWatchPartyTargetStateJson();
+                        if (!rawWp || rawWp.indexOf('"active":true') === -1) return;
+
+                        var v = activePlayingVideo || document.querySelector('video');
+                        if (!v) return;
+                        var vr = v.getBoundingClientRect();
+                        if (vr.width < 160 && vr.height < 100 && !document.fullscreenElement && !document.webkitFullscreenElement) return;
+
+                        bindWatchPartyToVideo(v);
+                        if (v.currentTime > 0.5) {
+                            DiziBridge.updateLocalPlaybackSnapshot(v.currentTime, !v.paused);
+                        }
+
+                        var wp = JSON.parse(rawWp);
+                        if (!wp || !wp.active || !wp.hasState) return;
+
+                        if (wp.seq !== lastAppliedWpSeq) {
+                            lastAppliedWpSeq = wp.seq;
+                            suppressWpLocalEventsUntil = Date.now() + 2400;
+
+                            if (wp.playing === false) {
+                                if (wp.targetTime > 0.5 && Math.abs(v.currentTime - wp.targetTime) > 1.2) {
+                                    v.currentTime = wp.targetTime;
+                                }
+                                if (!v.paused) {
+                                    v.pause();
+                                }
+                            } else {
+                                if (wp.targetTime > 0.5 && Math.abs(v.currentTime - wp.targetTime) > 2.0) {
+                                    v.currentTime = wp.targetTime;
+                                }
+                                if (v.paused) {
+                                    v.play().catch(function(){});
+                                }
+                            }
+                        } else if (wp.playing === true && !v.paused && wp.targetTime > 1.0 && Math.abs(v.currentTime - wp.targetTime) > 4.2) {
+                            // Oynatma sırasında 4 saniyeden fazla kayma (takılma/buffering) oluştuysa otomatik eşitle
+                            suppressWpLocalEventsUntil = Date.now() + 2400;
+                            v.currentTime = wp.targetTime;
+                        }
+                    } catch(e) {}
+                }, 900);
 
                 setInterval(function() {
                     try {
@@ -1498,6 +1801,7 @@ class MainActivity : Activity() {
                                 continue;
                             }
 
+                            bindWatchPartyToVideo(v);
                             var hasValidEpisodeDuration = (typeof v.duration === 'number' && isFinite(v.duration) && v.duration >= 900);
 
                             if (!v.__diziEndedBound) {
@@ -1521,6 +1825,11 @@ class MainActivity : Activity() {
                                     DiziBridge.videoPlayed(document.title || '', location.href, Math.floor(v.currentTime * 1000));
                                 } else if (tickCount % 5 === 0) {
                                     DiziBridge.videoProgress(location.href, Math.floor(v.currentTime * 1000));
+                                }
+
+                                // Watch Party aktifse her ~9 saniyede bir sessiz HEARTBEAT göndererek odadaki diğer kişilerin senkronunu koru
+                                if (tickCount % 4 === 0 && Date.now() > suppressWpLocalEventsUntil) {
+                                    DiziBridge.onLocalWatchPartyVideoEvent('HEARTBEAT', v.currentTime, true);
                                 }
 
                                 // Yalnızca otomatik sonraki bölüme geçildiğinde ve gerçek bölüm videosu (>10 dk) oynamaya başladığında otomatik Tam Ekran yap!
@@ -1600,6 +1909,34 @@ class MainActivity : Activity() {
     }
 
     inner class DiziJsBridge {
+        @JavascriptInterface
+        fun getWatchPartyTargetStateJson(): String {
+            return watchPartyManager.getTargetStateJsonForWebView()
+        }
+
+        @JavascriptInterface
+        fun updateLocalPlaybackSnapshot(positionSec: Double, isPlaying: Boolean) {
+            lastKnownPlaybackPosSec = positionSec
+            lastKnownIsPlaying = isPlaying
+        }
+
+        @JavascriptInterface
+        fun onLocalWatchPartyVideoEvent(action: String, positionSec: Double, isPlaying: Boolean) {
+            lastKnownPlaybackPosSec = positionSec
+            lastKnownIsPlaying = isPlaying
+            if (!watchPartyManager.isActive) return
+            runOnUiThread {
+                val mainUrl = if (currentScreen == ScreenState.WEB) (web.url ?: "") else ""
+                watchPartyManager.publishEvent(
+                    action = action,
+                    episodeUrl = mainUrl,
+                    isPlaying = isPlaying,
+                    positionSec = positionSec,
+                    force = (action == "PLAY" || action == "PAUSE" || action == "SEEK")
+                )
+            }
+        }
+
         @JavascriptInterface
         fun isAutoPlayPending(): Boolean {
             return System.currentTimeMillis() < autoNextTransitionActiveUntilMs && !autoNextPlayCompleted
@@ -1854,6 +2191,37 @@ class MainActivity : Activity() {
                     }
                 }
             }
+
+            // İmleç kapalıyken de WebView'in kendi başına koca bir paragraf/sayfa atlamasını önle; AŞAĞI/YUKARI tuşlarıyla tek satır (28px) kaydır
+            if (currentScreen == ScreenState.WEB && !cursorOverlay.isCursorEnabled && !topBar.hasFocus() && customFullscreenView == null) {
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        web.evaluateJavascript("window.scrollBy({ top: 28, behavior: 'instant' });", null)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        web.evaluateJavascript(
+                            "(function(){ var y = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0; window.scrollBy({ top: -28, behavior: 'instant' }); return y; })();"
+                        ) { res ->
+                            val yVal = res?.trim()?.toDoubleOrNull()?.toInt() ?: 0
+                            if (yVal <= 5 && web.scrollY <= 5) {
+                                focusTopBarElementAtCursorX(cursorOverlay.cursorX)
+                            }
+                        }
+                        return true
+                    }
+                }
+            }
+        } else if (event.action == KeyEvent.ACTION_UP) {
+            // ACTION_UP olayının WebView'e sızıp sayfa içi odak sıçraması (Page Down etkisi) yaratmasını engelle
+            if (currentScreen == ScreenState.WEB && !topBar.hasFocus()) {
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP,
+                    KeyEvent.KEYCODE_DPAD_DOWN,
+                    KeyEvent.KEYCODE_DPAD_LEFT,
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> return true
+                }
+            }
         }
         return super.dispatchKeyEvent(event)
     }
@@ -1884,6 +2252,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        watchPartyManager.leaveRoom(silent = true)
         remoteServer?.stop()
         historyIoExecutor.shutdownNow()
         try {

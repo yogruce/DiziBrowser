@@ -1,6 +1,6 @@
 {
-  "versionCode": 12,
-  "versionName": "1.6.3",
+  "versionCode": 13,
+  "versionName": "1.6.4",
   "apkUrl": "https://raw.githubusercontent.com/yogruce/DiziBrowser/main/DiziBrowser-TV-v1.0.apk",
-  "changelog": "• Kumanda Kaydırma (Scroll) ve Odak Sıçraması Düzeltildi (v1.6.3): WebView'e sızan D-Pad ACTION_UP odak zıplaması (Page Down etkisi) tamamen kapatıldı.\n• Her aşağı/yukarı basışta milimetrik tek satır (28px) kaydırma sağlandı ve CSS scroll-snap zıplamaları devre dışı bırakıldı."
+  "changelog": "• Üst Menü Kompakt Görünüm (v1.6.4): Geri (⬅), İmleç (🖱️) ve Favori (★/☆) butonlarındaki yazılar kaldırılarak sadece simge haline getirildi; tüm butonların ve Güncelle butonunun ekrana tam sığması sağlandı.\n• Kumanda tek satır kaydırma (28px) ve WebView odak sıçraması düzeltmesi aktif."
 }

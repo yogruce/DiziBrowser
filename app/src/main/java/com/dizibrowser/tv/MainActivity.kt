@@ -1005,8 +1005,9 @@ class MainActivity : Activity() {
     private fun toggleCursorMode() {
         val next = !cursorOverlay.isCursorEnabled
         cursorOverlay.isCursorEnabled = next
-        cursorButton.text = if (next) "🖱️ İmleç: Açık" else "🖱️ İmleç: Kapalı"
-        cursorButton.setTextColor(if (next) Color.parseColor("#00E5FF") else Color.LTGRAY)
+        cursorButton.text = "🖱️"
+        cursorButton.setTextColor(if (next) Color.parseColor("#00E5FF") else Color.GRAY)
+        cursorButton.alpha = if (next) 1.0f else 0.55f
 
         if (currentScreen == ScreenState.WEB) {
             if (next) {
@@ -1038,7 +1039,8 @@ class MainActivity : Activity() {
 
     private fun updateFavoriteButtonState(url: String) {
         val fav = history.isFavorite(url)
-        favButton.text = if (fav) "★ Favoride" else "☆ Favori"
+        favButton.text = if (fav) "★" else "☆"
+        favButton.setTextColor(if (fav) Color.parseColor("#FFD700") else Color.LTGRAY)
     }
 
     private fun updateBlockedCounterUi(statusMsg: String? = null) {
@@ -1147,8 +1149,9 @@ class MainActivity : Activity() {
 
         currentScreen = ScreenState.WEB
         cursorOverlay.isCursorEnabled = true
-        cursorButton.text = "🖱️ İmleç: Açık"
+        cursorButton.text = "🖱️"
         cursorButton.setTextColor(Color.parseColor("#00E5FF"))
+        cursorButton.alpha = 1.0f
         updateBackButtonVisual()
 
         host.removeAllViews()

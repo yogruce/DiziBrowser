@@ -18,11 +18,11 @@
 
         <Button
             android:id="@+id/backButton"
-            android:text="⬅ Geri"
-            android:textSize="11sp"
+            android:text="⬅"
+            android:textSize="14sp"
             android:textColor="#FFFFFF"
             android:background="@drawable/tv_button_bg"
-            android:paddingHorizontal="8dp"
+            android:paddingHorizontal="10dp"
             android:layout_marginEnd="4dp"
             android:layout_width="wrap_content"
             android:layout_height="40dp" />
@@ -67,11 +67,11 @@
 
         <Button
             android:id="@+id/cursorButton"
-            android:text="🖱️ İmleç: Açık"
-            android:textSize="11sp"
+            android:text="🖱️"
+            android:textSize="14sp"
             android:textColor="#00E5FF"
             android:background="@drawable/tv_button_bg"
-            android:paddingHorizontal="8dp"
+            android:paddingHorizontal="10dp"
             android:layout_marginEnd="4dp"
             android:layout_width="wrap_content"
             android:layout_height="40dp" />
@@ -101,11 +101,11 @@
 
         <Button
             android:id="@+id/favButton"
-            android:text="⭐ Favori"
-            android:textSize="11sp"
+            android:text="☆"
+            android:textSize="15sp"
             android:textColor="#FFD700"
             android:background="@drawable/tv_button_bg"
-            android:paddingHorizontal="8dp"
+            android:paddingHorizontal="10dp"
             android:layout_marginEnd="4dp"
             android:layout_width="wrap_content"
             android:layout_height="40dp" />

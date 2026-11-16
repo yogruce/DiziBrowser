@@ -1,6 +1,6 @@
 {
-  "versionCode": 14,
-  "versionName": "1.6.5",
+  "versionCode": 15,
+  "versionName": "1.6.6",
   "apkUrl": "https://raw.githubusercontent.com/yogruce/DiziBrowser/main/DiziBrowser-TV-v1.0.apk",
-  "changelog": "• 'Bu uygulama desteklenmiyor / Video bu uygulamanın içinde açılamaz' Çözümü (v1.6.5): hdfilmcehennemi ve gömülü oynatıcıların (/rplayer/) son günlerde eklediği WebView engeli tamamen aşıldı.\n• X-Requested-With paket kimliği, Sec-CH-UA Client Hints ('Android WebView') ve JavaScript tarayıcı parmak izi gerçek Chrome 131 & BrowseHere profiliyle maskelendi; eski önbellek otomatik temizlendi."
+  "changelog": "• hdfilmcehennemi 'Close' (hdfilmcehennemi.mobi) Oynatıcı Engeli Çözümü (v1.6.6): Sitede varsayılan açılan ve APK içinde 'Bu uygulama desteklenmiyor' hatası veren Close oynatıcısı algılandığında otomatik olarak çalışan Rapidrame (/rplayer/) oynatıcısına geçiş sağlandı.\n• R8 ile gizlenmiş (WV.*) sistem WebView sınıfları için X-Requested-With paket maskelemesi güçlendirildi."
 }

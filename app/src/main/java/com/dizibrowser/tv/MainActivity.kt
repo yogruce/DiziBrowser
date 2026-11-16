@@ -107,19 +107,29 @@ class MainActivity : Activity() {
     private var isRequestedWithHeaderDisabledNatively = false
 
     override fun getPackageName(): String {
-        return try {
-            val trace = Throwable().stackTrace
-            for (el in trace) {
-                val cls = el.className
-                val method = el.methodName
-                if (cls.contains("AwSettings") || method.contains("AllowListHeader")) {
-                    return "com.tcl.browser"
+        if (DiziApplication.spoofPackageNameForWebView) {
+            try {
+                val trace = Throwable().stackTrace
+                for (el in trace) {
+                    val cls = el.className
+                    if (cls == "com.dizibrowser.tv.DiziApplication" ||
+                        cls == "com.dizibrowser.tv.MainActivity" ||
+                        cls == "android.content.ContextWrapper" ||
+                        cls == "android.content.Context"
+                    ) {
+                        continue
+                    }
+                    if (cls.startsWith("WV.") ||
+                        cls.startsWith("org.chromium.") ||
+                        cls.startsWith("com.android.webview.")
+                    ) {
+                        return "com.tcl.browser"
+                    }
+                    break
                 }
-            }
-            super.getPackageName()
-        } catch (_: Exception) {
-            super.getPackageName()
+            } catch (_: Exception) {}
         }
+        return super.getPackageName()
     }
 
     private var lastRecordedUrl = ""
@@ -342,6 +352,13 @@ class MainActivity : Activity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
+        // Önce WebView motorunu ve BuildInfo'yu gerçek paket adıyla başlat, ardından AwSettings için X-Requested-With maskesini aç
+        try {
+            DiziApplication.spoofPackageNameForWebView = false
+            WebSettings.getDefaultUserAgent(this)
+        } catch (_: Exception) {}
+        DiziApplication.spoofPackageNameForWebView = true
+
         web = object : WebView(this) {
             override fun dispatchKeyEvent(event: KeyEvent): Boolean {
                 // WebView'in kendi başına D-Pad YUKARI/AŞAĞI tuşlarıyla odak zıplaması (spatial navigation / page down) yapmasını tamamen engelle!
@@ -508,11 +525,57 @@ class MainActivity : Activity() {
                     )
                 }
 
-                // Cihazın WebView sürümü REQUESTED_WITH_HEADER_ALLOW_LIST desteklemiyorsa veya /rplayer/ gömülü oynatıcı isteğiyse X-Requested-With başlığını temizleyerek getir
-                if (shouldSanitizeHtmlRequest(url, request)) {
-                    val cleanResp = fetchCleanHtmlWithoutAppHeader(url, request)
-                    if (cleanResp != null) {
-                        return cleanResp
+                // hdfilmcehennemi "Close" (hdfilmcehennemi.mobi) gömülü oynatıcısı WebView'i engellediğinde otomatik olarak çalışan Rapidrame (/rplayer/) oynatıcısına yönlendir
+                if (url.contains("hdfilmcehennemi.mobi/video/embed/", ignoreCase = true)) {
+                    val rapidId = try {
+                        request.url.getQueryParameter("rapidrame_id")
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (!rapidId.isNullOrBlank()) {
+                        val referer = request.requestHeaders?.get("Referer")
+                            ?: request.requestHeaders?.get("referer")
+                            ?: "https://www.hdfilmcehennemi.nl/"
+                        val refUri = try { Uri.parse(referer) } catch (_: Exception) { null }
+                        val origin = if (refUri != null && !refUri.scheme.isNullOrBlank() && !refUri.host.isNullOrBlank()) {
+                            "${refUri.scheme}://${refUri.host}"
+                        } else {
+                            "https://www.hdfilmcehennemi.nl"
+                        }
+                        val targetRplayer = "$origin/rplayer/$rapidId/"
+                        runOnUiThread {
+                            try {
+                                view.evaluateJavascript(
+                                    """
+                                    (function() {
+                                        var iframes = document.querySelectorAll('iframe');
+                                        for (var i = 0; i < iframes.length; i++) {
+                                            var s = iframes[i].getAttribute('src') || iframes[i].getAttribute('data-src') || '';
+                                            if (s.indexOf('hdfilmcehennemi.mobi') !== -1) {
+                                                iframes[i].setAttribute('data-src', '$targetRplayer');
+                                                iframes[i].setAttribute('src', '$targetRplayer');
+                                            }
+                                        }
+                                    })();
+                                    """.trimIndent(),
+                                    null
+                                )
+                            } catch (_: Exception) {}
+                        }
+                        val redirectHtml = """
+                            <!DOCTYPE html>
+                            <html><head><meta charset="utf-8">
+                            <script>window.location.replace("$targetRplayer");</script>
+                            </head><body style="background:#000;margin:0"></body></html>
+                        """.trimIndent()
+                        return WebResourceResponse(
+                            "text/html",
+                            "utf-8",
+                            200,
+                            "OK",
+                            mapOf("Cache-Control" to "no-store"),
+                            ByteArrayInputStream(redirectHtml.toByteArray(Charsets.UTF_8))
+                        )
                     }
                 }
 
@@ -678,11 +741,7 @@ class MainActivity : Activity() {
     }
 
     private fun loadUrlStealth(targetUrl: String) {
-        if (isRequestedWithHeaderDisabledNatively) {
-            web.loadUrl(targetUrl)
-        } else {
-            web.loadUrl(targetUrl, mapOf("X-Requested-With" to "com.tcl.browser"))
-        }
+        web.loadUrl(targetUrl, mapOf("X-Requested-With" to "com.tcl.browser"))
     }
 
     private fun extractUrlFromIntentScheme(intentUrl: String): String? {
@@ -701,144 +760,6 @@ class MainActivity : Activity() {
             val candidate = "$scheme://$hostAndPath"
             if (isSafeWebUrl(candidate)) candidate else null
         } catch (_: Exception) {
-            null
-        }
-    }
-
-    private val nonHtmlExtensions = arrayOf(
-        ".js", ".css", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".ico",
-        ".woff", ".woff2", ".ttf", ".otf", ".m3u8", ".mpd", ".ts", ".m4s",
-        ".mp4", ".webm", ".aac", ".mp3", ".vtt", ".srt", ".json", ".xml", ".wasm"
-    )
-
-    private fun shouldSanitizeHtmlRequest(url: String, request: WebResourceRequest): Boolean {
-        try {
-            if (!request.method.equals("GET", ignoreCase = true)) return false
-            if (!isSafeWebUrl(url)) return false
-            val uri = Uri.parse(url)
-            val pathLower = (uri.path ?: "").lowercase()
-            if (nonHtmlExtensions.any { pathLower.endsWith(it) }) return false
-
-            val lowerUrl = url.lowercase()
-            val isPlayerEmbed = lowerUrl.contains("/rplayer/")
-            val headers = request.requestHeaders ?: emptyMap()
-            val secDest = (headers["Sec-Fetch-Dest"] ?: headers["sec-fetch-dest"] ?: "").lowercase()
-            val accept = (headers["Accept"] ?: headers["accept"] ?: "").lowercase()
-            val isHtmlOrIframe = request.isForMainFrame ||
-                secDest == "iframe" ||
-                secDest == "document" ||
-                accept.contains("text/html")
-
-            if (!isHtmlOrIframe && !isPlayerEmbed) return false
-            return isPlayerEmbed || !isRequestedWithHeaderDisabledNatively
-        } catch (_: Exception) {
-            return false
-        }
-    }
-
-    private fun fetchCleanHtmlWithoutAppHeader(url: String, request: WebResourceRequest): WebResourceResponse? {
-        var conn: HttpURLConnection? = null
-        return try {
-            conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 7000
-                readTimeout = 7000
-                instanceFollowRedirects = false
-                useCaches = false
-            }
-
-            val reqHeaders = request.requestHeaders ?: emptyMap()
-            for ((k, v) in reqHeaders) {
-                val keyLower = k.lowercase()
-                if (keyLower == "x-requested-with" ||
-                    keyLower == "accept-encoding" ||
-                    keyLower == "host" ||
-                    keyLower == "connection" ||
-                    keyLower.startsWith("sec-ch-ua")
-                ) {
-                    continue
-                }
-                conn.setRequestProperty(k, v)
-            }
-
-            conn.setRequestProperty("User-Agent", desktopUserAgent)
-            conn.setRequestProperty(
-                "Sec-CH-UA",
-                "\"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\""
-            )
-            conn.setRequestProperty("Sec-CH-UA-Mobile", "?0")
-            conn.setRequestProperty("Sec-CH-UA-Platform", "\"Windows\"")
-
-            val cookie = CookieManager.getInstance().getCookie(url)
-            if (!cookie.isNullOrBlank()) {
-                conn.setRequestProperty("Cookie", cookie)
-            }
-
-            val status = conn.responseCode
-            if (status !in 200..299) {
-                conn.disconnect()
-                return null
-            }
-
-            val contentTypeHeader = conn.contentType ?: ""
-            if (!contentTypeHeader.contains("text/html", ignoreCase = true)) {
-                conn.disconnect()
-                return null
-            }
-
-            val headerFields = conn.headerFields
-            val setCookies = headerFields["Set-Cookie"] ?: headerFields["set-cookie"]
-            if (!setCookies.isNullOrEmpty()) {
-                val cm = CookieManager.getInstance()
-                for (sc in setCookies) {
-                    if (!sc.isNullOrBlank()) {
-                        cm.setCookie(url, sc)
-                    }
-                }
-            }
-
-            val rawStream = conn.inputStream
-            val decodedStream = if (conn.contentEncoding?.equals("gzip", ignoreCase = true) == true) {
-                GZIPInputStream(rawStream)
-            } else {
-                rawStream
-            }
-            val bytes = decodedStream.use { it.readBytes() }
-            if (bytes.isEmpty()) return null
-
-            val preview = String(bytes, 0, minOf(bytes.size, 2048), Charsets.UTF_8)
-            if (preview.contains("cf-browser-verification") || preview.contains("challenge-platform")) {
-                return null
-            }
-
-            val charset = Regex("charset=([a-zA-Z0-9-_]+)", RegexOption.IGNORE_CASE)
-                .find(contentTypeHeader)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?: "utf-8"
-
-            val respHeaders = mutableMapOf<String, String>()
-            for ((k, values) in headerFields) {
-                if (k == null || values.isNullOrEmpty()) continue
-                val kl = k.lowercase()
-                if (kl == "content-encoding" || kl == "content-length" || kl == "transfer-encoding" || kl == "x-frame-options") {
-                    continue
-                }
-                respHeaders[k] = values.joinToString(", ")
-            }
-
-            WebResourceResponse(
-                "text/html",
-                charset,
-                status,
-                "OK",
-                respHeaders,
-                ByteArrayInputStream(bytes)
-            )
-        } catch (_: Exception) {
-            try {
-                conn?.disconnect()
-            } catch (_: Exception) {}
             null
         }
     }
@@ -1921,9 +1842,30 @@ class MainActivity : Activity() {
                     window.addEventListener(evtName, onCaptureGestureForFullscreen, true);
                 });
 
-                // 4) Tüm <iframe>'lere autoplay ve fullscreen izni tanımla
+                // 4) Tüm <iframe>'lere autoplay ve fullscreen izni tanımla & hdfilmcehennemi "Close" (hdfilmcehennemi.mobi) engelini Rapidrame (/rplayer/) ile otomatik aş
+                var switchedToRapidrameOnce = false;
                 function upgradeAllIframes() {
                     try {
+                        if (isTopFrame && !switchedToRapidrameOnce) {
+                            var altBtns = document.querySelectorAll('button.alternative-link, .alternative-links button');
+                            var closeActive = false;
+                            var rapidBtn = null;
+                            for (var b = 0; b < altBtns.length; b++) {
+                                var btnText = (altBtns[b].innerText || altBtns[b].textContent || '').trim().toLowerCase();
+                                var isActive = altBtns[b].getAttribute('data-active') === '1' || altBtns[b].classList.contains('active');
+                                if (btnText.indexOf('close') !== -1 && isActive) {
+                                    closeActive = true;
+                                }
+                                if (btnText.indexOf('rapid') !== -1) {
+                                    rapidBtn = altBtns[b];
+                                }
+                            }
+                            if (closeActive && rapidBtn) {
+                                switchedToRapidrameOnce = true;
+                                rapidBtn.click();
+                            }
+                        }
+
                         var iframes = document.querySelectorAll('iframe');
                         for (var i = 0; i < iframes.length; i++) {
                             var ifr = iframes[i];
@@ -1934,7 +1876,36 @@ class MainActivity : Activity() {
                                 ifr.setAttribute('webkitallowfullscreen', 'true');
                                 ifr.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
                             }
+                            var rawSrc = ifr.getAttribute('src') || '';
+                            var rawDataSrc = ifr.getAttribute('data-src') || '';
+                            var combined = rawSrc || rawDataSrc;
+                            if (combined.indexOf('hdfilmcehennemi.mobi/video/embed/') !== -1) {
+                                var m = combined.match(/[?&]rapidrame_id=([a-zA-Z0-9_-]+)/i);
+                                if (m && m[1]) {
+                                    var rplayerUrl = location.origin + '/rplayer/' + m[1] + '/';
+                                    if (rawDataSrc && rawDataSrc !== rplayerUrl) {
+                                        ifr.setAttribute('data-src', rplayerUrl);
+                                    }
+                                    if (rawSrc && rawSrc !== rplayerUrl) {
+                                        ifr.setAttribute('src', rplayerUrl);
+                                    }
+                                }
+                            }
                         }
+                    } catch(e) {}
+                }
+
+                if (isTopFrame && typeof MutationObserver === 'function') {
+                    try {
+                        var obs = new MutationObserver(function() {
+                            upgradeAllIframes();
+                        });
+                        obs.observe(document.documentElement || document, {
+                            childList: true,
+                            subtree: true,
+                            attributes: true,
+                            attributeFilter: ['src', 'data-src']
+                        });
                     } catch(e) {}
                 }
 

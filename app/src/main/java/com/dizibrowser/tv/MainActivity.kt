@@ -20,8 +20,11 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import androidx.webkit.UserAgentMetadata
+import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import androidx.webkit.WebViewMediaIntegrityApiStatusConfig
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
@@ -46,11 +49,14 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.io.ByteArrayInputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.zip.GZIPInputStream
 import kotlin.math.abs
 
 class MainActivity : Activity() {
@@ -97,7 +103,24 @@ class MainActivity : Activity() {
     private var customFullscreenView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private var desktopUserAgent: String =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 BrowseHere"
+    private var isRequestedWithHeaderDisabledNatively = false
+
+    override fun getPackageName(): String {
+        return try {
+            val trace = Throwable().stackTrace
+            for (el in trace) {
+                val cls = el.className
+                val method = el.methodName
+                if (cls.contains("AwSettings") || method.contains("AllowListHeader")) {
+                    return "com.tcl.browser"
+                }
+            }
+            super.getPackageName()
+        } catch (_: Exception) {
+            super.getPackageName()
+        }
+    }
 
     private var lastRecordedUrl = ""
     private var lastRecordAt = 0L
@@ -139,7 +162,7 @@ class MainActivity : Activity() {
             autoPlayTapCount++
 
             web.evaluateJavascript(
-                "if (window.__diziUpdatePlayerCoordinatesOnly) window.__diziUpdatePlayerCoordinatesOnly();",
+                "(function(){ var c = window[Symbol.for('__db_ctl')]; if (c && c.updateCoords) c.updateCoords(); })();",
                 null
             )
 
@@ -357,8 +380,71 @@ class MainActivity : Activity() {
             userAgentString = desktopUserAgent
         }
 
+        // 1) WebView X-Requested-With uygulama kimliği başlığını tamamen gizle
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
+            try {
+                WebSettingsCompat.setRequestedWithHeaderOriginAllowList(web.settings, emptySet())
+                isRequestedWithHeaderDisabledNatively = true
+            } catch (_: Exception) {}
+        }
+
+        // 2) Sec-CH-UA (Client Hints) başlıklarındaki "Android WebView" ibaresini gerçek Google Chrome 131 ile değiştir
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA)) {
+            try {
+                val brands = listOf(
+                    UserAgentMetadata.BrandVersion.Builder()
+                        .setBrand("Not(A:Brand")
+                        .setMajorVersion("99")
+                        .setFullVersion("99.0.0.0")
+                        .build(),
+                    UserAgentMetadata.BrandVersion.Builder()
+                        .setBrand("Google Chrome")
+                        .setMajorVersion("131")
+                        .setFullVersion("131.0.6778.200")
+                        .build(),
+                    UserAgentMetadata.BrandVersion.Builder()
+                        .setBrand("Chromium")
+                        .setMajorVersion("131")
+                        .setFullVersion("131.0.6778.200")
+                        .build()
+                )
+                val uaMetadata = UserAgentMetadata.Builder()
+                    .setBrandVersionList(brands)
+                    .setFullVersion("131.0.6778.200")
+                    .setPlatform("Windows")
+                    .setPlatformVersion("10.0.0")
+                    .setArchitecture("x86")
+                    .setBitness(64)
+                    .setModel("")
+                    .setMobile(false)
+                    .setWow64(false)
+                    .build()
+                WebSettingsCompat.setUserAgentMetadata(web.settings, uaMetadata)
+            } catch (_: Exception) {}
+        }
+
+        // 3) WebView Media Integrity API üzerinden paket adı (com.dizibrowser.tv) sızıntısını kapat
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEBVIEW_MEDIA_INTEGRITY_API_STATUS)) {
+            try {
+                val integrityConfig = WebViewMediaIntegrityApiStatusConfig.Builder(
+                    WebViewMediaIntegrityApiStatusConfig.WEBVIEW_MEDIA_INTEGRITY_API_ENABLED_WITHOUT_APP_IDENTITY
+                ).build()
+                WebSettingsCompat.setWebViewMediaIntegrityApiStatus(web.settings, integrityConfig)
+            } catch (_: Exception) {}
+        }
+
         CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(web, false)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
+
+        // Yeni sürüme geçildiğinde önceden önbelleğe alınmış "Bu uygulama desteklenmiyor" sayfalarını temizle
+        val cachePrefs = getSharedPreferences("dizi_settings", Context.MODE_PRIVATE)
+        val curVerCode = AppUpdater.getCurrentVersionCode(this)
+        if (cachePrefs.getInt("last_cache_cleared_version", 0) < curVerCode) {
+            try {
+                web.clearCache(true)
+                cachePrefs.edit().putInt("last_cache_cleared_version", curVerCode).apply()
+            } catch (_: Exception) {}
+        }
 
         web.setDownloadListener(DownloadListener { url, _, _, mimetype, _ ->
             runOnUiThread {
@@ -387,6 +473,15 @@ class MainActivity : Activity() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url.toString()
 
+                // Sitelerdeki "Chrome'da aç" (intent://...) butonlarına basıldığında harici uygulama aramak yerine doğrudan temiz URL'yi aç
+                if (url.startsWith("intent://", ignoreCase = true)) {
+                    val cleanTarget = extractUrlFromIntentScheme(url)
+                    if (cleanTarget != null && isSafeWebUrl(cleanTarget) && !AdBlocker.isBlocked(cleanTarget)) {
+                        view.loadUrl(cleanTarget, mapOf("X-Requested-With" to "com.tcl.browser"))
+                    }
+                    return true
+                }
+
                 if (AdBlocker.isDangerousDownload(url)) {
                     updateBlockedCounterUi("🛑 APK/Zararlı dosya bağlantısı engellendi")
                     return true
@@ -411,6 +506,14 @@ class MainActivity : Activity() {
                         emptyMap(),
                         ByteArrayInputStream(ByteArray(0))
                     )
+                }
+
+                // Cihazın WebView sürümü REQUESTED_WITH_HEADER_ALLOW_LIST desteklemiyorsa veya /rplayer/ gömülü oynatıcı isteğiyse X-Requested-With başlığını temizleyerek getir
+                if (shouldSanitizeHtmlRequest(url, request)) {
+                    val cleanResp = fetchCleanHtmlWithoutAppHeader(url, request)
+                    if (cleanResp != null) {
+                        return cleanResp
+                    }
                 }
 
                 return super.shouldInterceptRequest(view, request)
@@ -571,6 +674,172 @@ class MainActivity : Activity() {
             }
 
             override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean = true
+        }
+    }
+
+    private fun loadUrlStealth(targetUrl: String) {
+        if (isRequestedWithHeaderDisabledNatively) {
+            web.loadUrl(targetUrl)
+        } else {
+            web.loadUrl(targetUrl, mapOf("X-Requested-With" to "com.tcl.browser"))
+        }
+    }
+
+    private fun extractUrlFromIntentScheme(intentUrl: String): String? {
+        return try {
+            val fallbackIdx = intentUrl.indexOf("S.browser_fallback_url=", ignoreCase = true)
+            if (fallbackIdx != -1) {
+                val start = fallbackIdx + "S.browser_fallback_url=".length
+                val end = intentUrl.indexOf(';', start).let { if (it == -1) intentUrl.length else it }
+                val decoded = Uri.decode(intentUrl.substring(start, end))
+                if (isSafeWebUrl(decoded)) return decoded
+            }
+            val body = intentUrl.removePrefix("intent://").removePrefix("INTENT://")
+            val hashIdx = body.indexOf("#Intent")
+            val hostAndPath = if (hashIdx != -1) body.substring(0, hashIdx) else body
+            val scheme = if (intentUrl.contains("scheme=http;", ignoreCase = true)) "http" else "https"
+            val candidate = "$scheme://$hostAndPath"
+            if (isSafeWebUrl(candidate)) candidate else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private val nonHtmlExtensions = arrayOf(
+        ".js", ".css", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".ico",
+        ".woff", ".woff2", ".ttf", ".otf", ".m3u8", ".mpd", ".ts", ".m4s",
+        ".mp4", ".webm", ".aac", ".mp3", ".vtt", ".srt", ".json", ".xml", ".wasm"
+    )
+
+    private fun shouldSanitizeHtmlRequest(url: String, request: WebResourceRequest): Boolean {
+        try {
+            if (!request.method.equals("GET", ignoreCase = true)) return false
+            if (!isSafeWebUrl(url)) return false
+            val uri = Uri.parse(url)
+            val pathLower = (uri.path ?: "").lowercase()
+            if (nonHtmlExtensions.any { pathLower.endsWith(it) }) return false
+
+            val lowerUrl = url.lowercase()
+            val isPlayerEmbed = lowerUrl.contains("/rplayer/")
+            val headers = request.requestHeaders ?: emptyMap()
+            val secDest = (headers["Sec-Fetch-Dest"] ?: headers["sec-fetch-dest"] ?: "").lowercase()
+            val accept = (headers["Accept"] ?: headers["accept"] ?: "").lowercase()
+            val isHtmlOrIframe = request.isForMainFrame ||
+                secDest == "iframe" ||
+                secDest == "document" ||
+                accept.contains("text/html")
+
+            if (!isHtmlOrIframe && !isPlayerEmbed) return false
+            return isPlayerEmbed || !isRequestedWithHeaderDisabledNatively
+        } catch (_: Exception) {
+            return false
+        }
+    }
+
+    private fun fetchCleanHtmlWithoutAppHeader(url: String, request: WebResourceRequest): WebResourceResponse? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 7000
+                readTimeout = 7000
+                instanceFollowRedirects = false
+                useCaches = false
+            }
+
+            val reqHeaders = request.requestHeaders ?: emptyMap()
+            for ((k, v) in reqHeaders) {
+                val keyLower = k.lowercase()
+                if (keyLower == "x-requested-with" ||
+                    keyLower == "accept-encoding" ||
+                    keyLower == "host" ||
+                    keyLower == "connection" ||
+                    keyLower.startsWith("sec-ch-ua")
+                ) {
+                    continue
+                }
+                conn.setRequestProperty(k, v)
+            }
+
+            conn.setRequestProperty("User-Agent", desktopUserAgent)
+            conn.setRequestProperty(
+                "Sec-CH-UA",
+                "\"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\""
+            )
+            conn.setRequestProperty("Sec-CH-UA-Mobile", "?0")
+            conn.setRequestProperty("Sec-CH-UA-Platform", "\"Windows\"")
+
+            val cookie = CookieManager.getInstance().getCookie(url)
+            if (!cookie.isNullOrBlank()) {
+                conn.setRequestProperty("Cookie", cookie)
+            }
+
+            val status = conn.responseCode
+            if (status !in 200..299) {
+                conn.disconnect()
+                return null
+            }
+
+            val contentTypeHeader = conn.contentType ?: ""
+            if (!contentTypeHeader.contains("text/html", ignoreCase = true)) {
+                conn.disconnect()
+                return null
+            }
+
+            val headerFields = conn.headerFields
+            val setCookies = headerFields["Set-Cookie"] ?: headerFields["set-cookie"]
+            if (!setCookies.isNullOrEmpty()) {
+                val cm = CookieManager.getInstance()
+                for (sc in setCookies) {
+                    if (!sc.isNullOrBlank()) {
+                        cm.setCookie(url, sc)
+                    }
+                }
+            }
+
+            val rawStream = conn.inputStream
+            val decodedStream = if (conn.contentEncoding?.equals("gzip", ignoreCase = true) == true) {
+                GZIPInputStream(rawStream)
+            } else {
+                rawStream
+            }
+            val bytes = decodedStream.use { it.readBytes() }
+            if (bytes.isEmpty()) return null
+
+            val preview = String(bytes, 0, minOf(bytes.size, 2048), Charsets.UTF_8)
+            if (preview.contains("cf-browser-verification") || preview.contains("challenge-platform")) {
+                return null
+            }
+
+            val charset = Regex("charset=([a-zA-Z0-9-_]+)", RegexOption.IGNORE_CASE)
+                .find(contentTypeHeader)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?: "utf-8"
+
+            val respHeaders = mutableMapOf<String, String>()
+            for ((k, values) in headerFields) {
+                if (k == null || values.isNullOrEmpty()) continue
+                val kl = k.lowercase()
+                if (kl == "content-encoding" || kl == "content-length" || kl == "transfer-encoding" || kl == "x-frame-options") {
+                    continue
+                }
+                respHeaders[k] = values.joinToString(", ")
+            }
+
+            WebResourceResponse(
+                "text/html",
+                charset,
+                status,
+                "OK",
+                respHeaders,
+                ByteArrayInputStream(bytes)
+            )
+        } catch (_: Exception) {
+            try {
+                conn?.disconnect()
+            } catch (_: Exception) {}
+            null
         }
     }
 
@@ -940,11 +1209,11 @@ class MainActivity : Activity() {
                 showFloatingCursorBanner("⏭️ Sonraki bölüme geçiliyor • Otomatik başlatılıp tam ekran yapılacak...")
                 statusBar.text = "⏭️ Sonraki bölüm açılıyor: $nextUrl"
                 addressBar.setText(nextUrl)
-                web.loadUrl(nextUrl)
+                loadUrlStealth(nextUrl)
             } else {
                 showFloatingCursorBanner("⏭️ Sonraki bölüme geçiliyor • Otomatik başlatılıp tam ekran yapılacak...")
                 web.evaluateJavascript(
-                    "if (window.__diziClickNextEpisode) window.__diziClickNextEpisode();",
+                    "(function(){ var c = window[Symbol.for('__db_ctl')]; if (c && c.clickNext) c.clickNext(); })();",
                     null
                 )
                 uiHandler.postDelayed(autoPlayTapAssistRunnable, 2000L)
@@ -1162,7 +1431,7 @@ class MainActivity : Activity() {
         cursorOverlay.centerCursor()
         activateWebCursorNow()
         showFloatingCursorBanner("🖱️ İmleci Açmak/Kapatmak için OK tuşuna 1 sn basılı tutabilirsiniz")
-        web.loadUrl(raw)
+        loadUrlStealth(raw)
     }
 
     private fun showHome() {
@@ -1450,23 +1719,130 @@ class MainActivity : Activity() {
 
     /**
      * Hem ana sayfada (window.top) hem de tüm Cross-Origin video oynatıcı <iframe>'leri (VidMoly, CloseLoad,
-     * Rapidrame, Ok.ru, Sibnet, JWPlayer, Plyr, VideoJS vb.) içinde çalışan evrensel otomasyon betiği.
+     * Rapidrame, Ok.ru, Sibnet, JWPlayer, Plyr, VideoJS vb.) içinde çalışan evrensel otomasyon ve gizlilik betiği.
      */
     private fun getUniversalAllFramesScript(): String {
         return """
             (function() {
-                if (window.__diziUniversalInstalled) return;
-                window.__diziUniversalInstalled = true;
+                var installSym = typeof Symbol === 'function' ? Symbol.for('__db_u_init') : '__db_u_init';
+                var bridgeSym = typeof Symbol === 'function' ? Symbol.for('__db_bridge') : '__db_bridge';
+                var ctlSym = typeof Symbol === 'function' ? Symbol.for('__db_ctl') : '__db_ctl';
+                var upgSym = typeof Symbol === 'function' ? Symbol.for('__db_upg') : '__db_upg';
+                var wpSym = typeof Symbol === 'function' ? Symbol.for('__db_wp') : '__db_wp';
+                var endSym = typeof Symbol === 'function' ? Symbol.for('__db_end') : '__db_end';
 
-                // 1) Tüm frame'lerde reklam amaçlı açılan popup pencereleri engelle
+                // 0) DiziBridge nesnesini sayfa/oynatıcı scriptlerinden tamamen gizle, yalnızca private referansta tut
+                var Bridge = null;
                 try {
-                    window.open = function() { return null; };
+                    if (window[bridgeSym]) {
+                        Bridge = window[bridgeSym];
+                    } else if (window.DiziBridge) {
+                        Bridge = window.DiziBridge;
+                        window[bridgeSym] = Bridge;
+                    }
+                    try {
+                        delete window.DiziBridge;
+                    } catch(e) {}
+                    if ('DiziBridge' in window) {
+                        Object.defineProperty(window, 'DiziBridge', {
+                            get: function() { return undefined; },
+                            set: function() {},
+                            enumerable: false,
+                            configurable: true
+                        });
+                    }
+                } catch(e) {}
+
+                if (window[installSym]) return;
+                window[installSym] = true;
+
+                // 1) WebView / In-App Browser Algılama Koruması (Chrome 131 Masaüstü & BrowseHere Uyumluluğu)
+                try {
+                    var uaBrands = [
+                        { brand: 'Not(A:Brand', version: '99' },
+                        { brand: 'Google Chrome', version: '131' },
+                        { brand: 'Chromium', version: '131' }
+                    ];
+                    var fullVersionList = [
+                        { brand: 'Not(A:Brand', version: '99.0.0.0' },
+                        { brand: 'Google Chrome', version: '131.0.6778.200' },
+                        { brand: 'Chromium', version: '131.0.6778.200' }
+                    ];
+                    var fakeUaData = {
+                        brands: uaBrands,
+                        mobile: false,
+                        platform: 'Windows',
+                        getHighEntropyValues: function(hints) {
+                            return Promise.resolve({
+                                architecture: 'x86',
+                                bitness: '64',
+                                brands: uaBrands,
+                                fullVersionList: fullVersionList,
+                                mobile: false,
+                                model: '',
+                                platform: 'Windows',
+                                platformVersion: '10.0.0',
+                                uaFullVersion: '131.0.6778.200',
+                                wow64: false
+                            });
+                        },
+                        toJSON: function() {
+                            return { brands: uaBrands, mobile: false, platform: 'Windows' };
+                        }
+                    };
+                    Object.defineProperty(Navigator.prototype, 'userAgentData', {
+                        get: function() { return fakeUaData; },
+                        configurable: true
+                    });
+                    Object.defineProperty(Navigator.prototype, 'platform', {
+                        get: function() { return 'Win32'; },
+                        configurable: true
+                    });
+                    Object.defineProperty(Navigator.prototype, 'vendor', {
+                        get: function() { return 'Google Inc.'; },
+                        configurable: true
+                    });
+                    Object.defineProperty(Navigator.prototype, 'maxTouchPoints', {
+                        get: function() { return 0; },
+                        configurable: true
+                    });
+                    Object.defineProperty(Navigator.prototype, 'webdriver', {
+                        get: function() { return false; },
+                        configurable: true
+                    });
+                    Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', {
+                        get: function() { return true; },
+                        configurable: true
+                    });
+
+                    if (!window.chrome) {
+                        window.chrome = {};
+                    }
+                    if (!window.chrome.runtime) {
+                        window.chrome.runtime = {
+                            OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
+                            PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' }
+                        };
+                    }
+                    if (!window.chrome.app) {
+                        window.chrome.app = { isInstalled: false };
+                    }
+                    if (!window.chrome.csi) {
+                        window.chrome.csi = function() { return { startE: Date.now(), onloadT: Date.now(), pageT: 120, tran: 15 }; };
+                    }
+                    if (!window.chrome.loadTimes) {
+                        window.chrome.loadTimes = function() { return { requestTime: Date.now() / 1000 }; };
+                    }
+
+                    var noopOpen = function open() { return null; };
+                    noopOpen.toString = function() { return 'function open() { [native code] }'; };
+                    window.open = noopOpen;
                 } catch(e) {}
 
                 var isTopFrame = (window === window.top);
                 var activePlayingVideo = null;
-                window.__diziNeedFullscreenGesture = false;
-                window.__diziFullscreenGestureExpireAt = 0;
+                var needFullscreenGesture = false;
+                var fullscreenGestureExpireAt = 0;
 
                 // 2) Videoyu veya oynatıcı kapsayıcısını Tam Ekran (HTML5 Fullscreen) yapan yardımcı
                 function enterPlayerFullscreen(v) {
@@ -1512,20 +1888,17 @@ class MainActivity : Activity() {
                 }
 
                 // 3) Capture-Phase (Yakalama Evresi) Dokunuş Dinleyicisi:
-                // Android'in gönderdiği donanımsal dokunuşu oynatıcıya (pause butonuna) ulaşmadan yakalar,
-                // videonun duraklatılmasını engeller ve Chromium UserActivation izniyle Tam Ekranı tetikler!
                 function onCaptureGestureForFullscreen(e) {
                     try {
-                        if (!window.__diziNeedFullscreenGesture) return;
-                        if (Date.now() > window.__diziFullscreenGestureExpireAt || document.fullscreenElement || document.webkitFullscreenElement) {
-                            window.__diziNeedFullscreenGesture = false;
+                        if (!needFullscreenGesture) return;
+                        if (Date.now() > fullscreenGestureExpireAt || document.fullscreenElement || document.webkitFullscreenElement) {
+                            needFullscreenGesture = false;
                             return;
                         }
                         var v = activePlayingVideo || document.querySelector('video');
                         if (!v) return;
 
                         if (e.type === 'pointerdown' || e.type === 'touchstart' || e.type === 'mousedown') {
-                            // Oynatıcının dokunuşu görüp videoyu duraklatmasını engelle ama Chromium'un tap jestini tamamlamasına izin ver
                             e.stopImmediatePropagation();
                             return;
                         }
@@ -1538,7 +1911,7 @@ class MainActivity : Activity() {
                             if (v.paused) v.play().catch(function(){});
                             enterPlayerFullscreen(v);
                             if (e.type === 'click') {
-                                window.__diziNeedFullscreenGesture = false;
+                                needFullscreenGesture = false;
                             }
                         }
                     } catch(err) {}
@@ -1554,8 +1927,8 @@ class MainActivity : Activity() {
                         var iframes = document.querySelectorAll('iframe');
                         for (var i = 0; i < iframes.length; i++) {
                             var ifr = iframes[i];
-                            if (!ifr.__diziUpgraded) {
-                                ifr.__diziUpgraded = true;
+                            if (!ifr[upgSym]) {
+                                ifr[upgSym] = true;
                                 ifr.allowFullscreen = true;
                                 ifr.setAttribute('allowfullscreen', 'true');
                                 ifr.setAttribute('webkitallowfullscreen', 'true');
@@ -1607,10 +1980,11 @@ class MainActivity : Activity() {
 
                 function findMainPlayerElement() {
                     var selectors = [
-                        'iframe[src*="embed"]', 'iframe[src*="player"]', 'iframe[src*="vidmoly"]',
-                        'iframe[src*="closeload"]', 'iframe[src*="rapid"]', 'iframe[src*="ok.ru"]',
-                        'iframe[src*="sibnet"]', 'iframe[src*="contentx"]', 'iframe[src*="pichive"]',
-                        'video', '.player-box', '#player', '.video-player', '.player-container',
+                        'iframe[src*="rplayer"]', 'iframe[src*="embed"]', 'iframe[src*="player"]',
+                        'iframe[src*="vidmoly"]', 'iframe[src*="closeload"]', 'iframe[src*="rapid"]',
+                        'iframe[src*="ok.ru"]', 'iframe[src*="sibnet"]', 'iframe[src*="contentx"]',
+                        'iframe[src*="pichive"]', 'video', '.play-that-video', '[aria-label="Play video"]',
+                        '.player-box', '#player', '.video-player', '.player-container',
                         '.embed-container', '#video-area', '.player', 'iframe'
                     ];
                     for (var s = 0; s < selectors.length; s++) {
@@ -1626,49 +2000,49 @@ class MainActivity : Activity() {
                 }
 
                 if (isTopFrame) {
-                    window.__diziClickNextEpisode = function() {
-                        var found = findNextEpisodeElement();
-                        if (found && found.el) {
-                            found.el.click();
-                            return true;
-                        }
-                        return false;
-                    };
-
-                    // Sayfayı kaydırmadan ve hiçbir linke tıklamadan sadece oynatıcının ekran koordinatlarını günceller
-                    window.__diziUpdatePlayerCoordinatesOnly = function() {
-                        try {
-                            upgradeAllIframes();
-                            var pEl = findMainPlayerElement();
-                            if (pEl) {
-                                var r = pEl.getBoundingClientRect();
-                                if (r.width > 160 && r.height > 100 && window.innerWidth > 0 && window.innerHeight > 0) {
-                                    var rx = (r.left + r.width / 2) / window.innerWidth;
-                                    var ry = (r.top + r.height / 2) / window.innerHeight;
-                                    if (window.DiziBridge && DiziBridge.onPlayerRectFound) {
-                                        DiziBridge.onPlayerRectFound(rx, ry);
+                    window[ctlSym] = {
+                        clickNext: function() {
+                            var found = findNextEpisodeElement();
+                            if (found && found.el) {
+                                found.el.click();
+                                return true;
+                            }
+                            return false;
+                        },
+                        updateCoords: function() {
+                            try {
+                                upgradeAllIframes();
+                                var pEl = findMainPlayerElement();
+                                if (pEl) {
+                                    var r = pEl.getBoundingClientRect();
+                                    if (r.width > 160 && r.height > 100 && window.innerWidth > 0 && window.innerHeight > 0) {
+                                        var rx = (r.left + r.width / 2) / window.innerWidth;
+                                        var ry = (r.top + r.height / 2) / window.innerHeight;
+                                        if (Bridge && Bridge.onPlayerRectFound) {
+                                            Bridge.onPlayerRectFound(rx, ry);
+                                        }
                                     }
                                 }
-                            }
-                        } catch(e) {}
+                            } catch(e) {}
+                        }
                     };
                 }
 
                 function checkAndReportNextEpisode() {
-                    if (!isTopFrame) return;
+                    if (!isTopFrame || !Bridge) return;
                     try {
                         upgradeAllIframes();
                         var found = findNextEpisodeElement();
                         if (found) {
-                            DiziBridge.onNextEpisodeDetected(found.url || '', found.label || 'Sonraki Bölüm');
+                            Bridge.onNextEpisodeDetected(found.url || '', found.label || 'Sonraki Bölüm');
                         } else {
-                            DiziBridge.onNextEpisodeDetected('', '');
+                            Bridge.onNextEpisodeDetected('', '');
                         }
                         var pEl = findMainPlayerElement();
                         if (pEl && window.innerWidth > 0 && window.innerHeight > 0) {
                             var r = pEl.getBoundingClientRect();
                             if (r.top >= 0 && r.bottom <= window.innerHeight && r.width >= 240 && r.height >= 140) {
-                                DiziBridge.onPlayerRectFound((r.left + r.width / 2) / window.innerWidth, (r.top + r.height / 2) / window.innerHeight);
+                                Bridge.onPlayerRectFound((r.left + r.width / 2) / window.innerWidth, (r.top + r.height / 2) / window.innerHeight);
                             }
                         }
                     } catch(e) {}
@@ -1677,7 +2051,7 @@ class MainActivity : Activity() {
                 // 6) Otomatik Oynatma Denemesi (Yalnızca sonraki bölüme otomatik geçildiğinde ve kesinlikle <a> linklerine dokunmadan!)
                 function tryAutoPlayInCurrentFrame() {
                     try {
-                        if (!window.DiziBridge || !DiziBridge.isAutoPlayPending || !DiziBridge.isAutoPlayPending()) return;
+                        if (!Bridge || !Bridge.isAutoPlayPending || !Bridge.isAutoPlayPending()) return;
                         var videos = document.querySelectorAll('video');
                         for (var i = 0; i < videos.length; i++) {
                             var v = videos[i];
@@ -1690,7 +2064,7 @@ class MainActivity : Activity() {
                             }
                         }
                         // Yalnızca gerçek video oynatıcılarının kendi iç Play butonlarına tıkla (Kesinlikle <a> linklerine tıklama!)
-                        var playBtns = document.querySelectorAll('.jw-icon-display, .jw-display-icon-container, .vjs-big-play-button, .plyr__control--overlaid, .art-state, .dplayer-play-icon, .fp-play');
+                        var playBtns = document.querySelectorAll('.play-that-video, [aria-label="Play video"], .jw-icon-display, .jw-display-icon-container, .vjs-big-play-button, .plyr__control--overlaid, .art-state, .dplayer-play-icon, .fp-play');
                         for (var b = 0; b < playBtns.length; b++) {
                             var btn = playBtns[b];
                             if (btn.closest && btn.closest('a')) continue;
@@ -1713,29 +2087,29 @@ class MainActivity : Activity() {
 
                 // 7) Watch Party (Birlikte İzle) Gerçek Zamanlı Video Senkronizasyonu (Cross-Origin Iframe Dahil!)
                 function bindWatchPartyToVideo(v) {
-                    if (v.__diziWpBound) return;
-                    v.__diziWpBound = true;
+                    if (v[wpSym]) return;
+                    v[wpSym] = true;
 
                     v.addEventListener('play', function() {
-                        if (Date.now() > suppressWpLocalEventsUntil && v.currentTime > 0.5) {
+                        if (Date.now() > suppressWpLocalEventsUntil && v.currentTime > 0.5 && Bridge) {
                             try {
-                                DiziBridge.onLocalWatchPartyVideoEvent('PLAY', v.currentTime, true);
+                                Bridge.onLocalWatchPartyVideoEvent('PLAY', v.currentTime, true);
                             } catch(e) {}
                         }
                     });
 
                     v.addEventListener('pause', function() {
-                        if (Date.now() > suppressWpLocalEventsUntil && !v.ended && v.currentTime > 0.5) {
+                        if (Date.now() > suppressWpLocalEventsUntil && !v.ended && v.currentTime > 0.5 && Bridge) {
                             try {
-                                DiziBridge.onLocalWatchPartyVideoEvent('PAUSE', v.currentTime, false);
+                                Bridge.onLocalWatchPartyVideoEvent('PAUSE', v.currentTime, false);
                             } catch(e) {}
                         }
                     });
 
                     v.addEventListener('seeked', function() {
-                        if (Date.now() > suppressWpLocalEventsUntil && v.currentTime > 0.5) {
+                        if (Date.now() > suppressWpLocalEventsUntil && v.currentTime > 0.5 && Bridge) {
                             try {
-                                DiziBridge.onLocalWatchPartyVideoEvent('SEEK', v.currentTime, !v.paused);
+                                Bridge.onLocalWatchPartyVideoEvent('SEEK', v.currentTime, !v.paused);
                             } catch(e) {}
                         }
                     });
@@ -1744,8 +2118,8 @@ class MainActivity : Activity() {
                 // Her 900ms'de bir Watch Party hedef durumunu kontrol edip videoyu milimetrik hizalar
                 setInterval(function() {
                     try {
-                        if (!window.DiziBridge || !DiziBridge.getWatchPartyTargetStateJson) return;
-                        var rawWp = DiziBridge.getWatchPartyTargetStateJson();
+                        if (!Bridge || !Bridge.getWatchPartyTargetStateJson) return;
+                        var rawWp = Bridge.getWatchPartyTargetStateJson();
                         if (!rawWp || rawWp.indexOf('"active":true') === -1) return;
 
                         var v = activePlayingVideo || document.querySelector('video');
@@ -1755,7 +2129,7 @@ class MainActivity : Activity() {
 
                         bindWatchPartyToVideo(v);
                         if (v.currentTime > 0.5) {
-                            DiziBridge.updateLocalPlaybackSnapshot(v.currentTime, !v.paused);
+                            Bridge.updateLocalPlaybackSnapshot(v.currentTime, !v.paused);
                         }
 
                         var wp = JSON.parse(rawWp);
@@ -1781,7 +2155,6 @@ class MainActivity : Activity() {
                                 }
                             }
                         } else if (wp.playing === true && !v.paused && wp.targetTime > 1.0 && Math.abs(v.currentTime - wp.targetTime) > 4.2) {
-                            // Oynatma sırasında 4 saniyeden fazla kayma (takılma/buffering) oluştuysa otomatik eşitle
                             suppressWpLocalEventsUntil = Date.now() + 2400;
                             v.currentTime = wp.targetTime;
                         }
@@ -1807,13 +2180,12 @@ class MainActivity : Activity() {
                             bindWatchPartyToVideo(v);
                             var hasValidEpisodeDuration = (typeof v.duration === 'number' && isFinite(v.duration) && v.duration >= 900);
 
-                            if (!v.__diziEndedBound) {
-                                v.__diziEndedBound = true;
+                            if (!v[endSym]) {
+                                v[endSym] = true;
                                 v.addEventListener('ended', function() {
-                                    // Yalnızca gerçekten en az 15 dakikalık (900 sn) bir bölüm videosuysa ve bu sayfada en az 60 saniye izlendiyse!
-                                    if (!countdownRequested && isFinite(v.duration) && v.duration >= 900 && tickCount >= 28 && v.currentTime >= (v.duration * 0.90)) {
+                                    if (!countdownRequested && Bridge && isFinite(v.duration) && v.duration >= 900 && tickCount >= 28 && v.currentTime >= (v.duration * 0.90)) {
                                         countdownRequested = true;
-                                        DiziBridge.onStartNetflixCountdown(10);
+                                        Bridge.onStartNetflixCountdown(10);
                                     }
                                 });
                             }
@@ -1823,47 +2195,42 @@ class MainActivity : Activity() {
                                 activePlayingVideo = v;
                                 tickCount++;
 
-                                if (!recorded && tickCount >= 2) {
-                                    recorded = true;
-                                    DiziBridge.videoPlayed(document.title || '', location.href, Math.floor(v.currentTime * 1000));
-                                } else if (tickCount % 5 === 0) {
-                                    DiziBridge.videoProgress(location.href, Math.floor(v.currentTime * 1000));
-                                }
+                                if (Bridge) {
+                                    if (!recorded && tickCount >= 2) {
+                                        recorded = true;
+                                        Bridge.videoPlayed(document.title || '', location.href, Math.floor(v.currentTime * 1000));
+                                    } else if (tickCount % 5 === 0) {
+                                        Bridge.videoProgress(location.href, Math.floor(v.currentTime * 1000));
+                                    }
 
-                                // Watch Party aktifse her ~9 saniyede bir sessiz HEARTBEAT göndererek odadaki diğer kişilerin senkronunu koru
-                                if (tickCount % 4 === 0 && Date.now() > suppressWpLocalEventsUntil) {
-                                    DiziBridge.onLocalWatchPartyVideoEvent('HEARTBEAT', v.currentTime, true);
-                                }
+                                    if (tickCount % 4 === 0 && Date.now() > suppressWpLocalEventsUntil) {
+                                        Bridge.onLocalWatchPartyVideoEvent('HEARTBEAT', v.currentTime, true);
+                                    }
 
-                                // Yalnızca otomatik sonraki bölüme geçildiğinde ve gerçek bölüm videosu (>10 dk) oynamaya başladığında otomatik Tam Ekran yap!
-                                if (!autoFsTriggeredInFrame && !document.fullscreenElement && !document.webkitFullscreenElement) {
-                                    if (isFinite(v.duration) && v.duration >= 600 && v.currentTime > 1.5) {
-                                        if (window.DiziBridge && DiziBridge.shouldAutoFullscreenNow && DiziBridge.shouldAutoFullscreenNow()) {
-                                            autoFsTriggeredInFrame = true;
-                                            window.__diziNeedFullscreenGesture = true;
-                                            window.__diziFullscreenGestureExpireAt = Date.now() + 4500;
-                                            enterPlayerFullscreen(v);
-                                            DiziBridge.requestFullscreenTap();
+                                    if (!autoFsTriggeredInFrame && !document.fullscreenElement && !document.webkitFullscreenElement) {
+                                        if (isFinite(v.duration) && v.duration >= 600 && v.currentTime > 1.5) {
+                                            if (Bridge.shouldAutoFullscreenNow && Bridge.shouldAutoFullscreenNow()) {
+                                                autoFsTriggeredInFrame = true;
+                                                needFullscreenGesture = true;
+                                                fullscreenGestureExpireAt = Date.now() + 4500;
+                                                enterPlayerFullscreen(v);
+                                                Bridge.requestFullscreenTap();
+                                            }
                                         }
                                     }
-                                }
 
-                                // Bölümün bitmesine 15 saniye veya daha az kaldıysa:
-                                // ŞARTLAR:
-                                // 1) Video en az 15 dakika (900 sn) uzunluğunda olmalı (reklam/fragman olamaz)
-                                // 2) Kullanıcı bu sayfada videoyu en az ~60 saniyedir (tickCount >= 28) aktif izliyor olmalı (sayfa açılır açılmaz asla tetiklenmez!)
-                                // 3) Videonun en az %92'si bitmiş ve son 15 saniye içine girilmiş olmalı
-                                if (!countdownRequested && hasValidEpisodeDuration && tickCount >= 28 && (v.currentTime / v.duration) >= 0.92 && (v.duration - v.currentTime) <= 15) {
-                                    countdownRequested = true;
-                                    var rem = Math.max(8, Math.min(15, Math.floor(v.duration - v.currentTime)));
-                                    DiziBridge.onStartNetflixCountdown(rem);
+                                    if (!countdownRequested && hasValidEpisodeDuration && tickCount >= 28 && (v.currentTime / v.duration) >= 0.92 && (v.duration - v.currentTime) <= 15) {
+                                        countdownRequested = true;
+                                        var rem = Math.max(8, Math.min(15, Math.floor(v.duration - v.currentTime)));
+                                        Bridge.onStartNetflixCountdown(rem);
+                                    }
                                 }
                             }
                         }
 
                         if (anyPlaying && !wasPlaying) {
                             wasPlaying = true;
-                            DiziBridge.onVideoStartedPlaying();
+                            if (Bridge) Bridge.onVideoStartedPlaying();
                         } else if (!anyPlaying) {
                             wasPlaying = false;
                         }
@@ -1889,10 +2256,10 @@ class MainActivity : Activity() {
         val focusAndPlayerHelperJs = """
             (function() {
                 try {
-                    var focusStyleId = '__dizi_tv_focus_css';
-                    if (!document.getElementById(focusStyleId)) {
+                    var sym = typeof Symbol === 'function' ? Symbol.for('__db_focus_s') : '__db_focus_s';
+                    if (document.head && !document[sym]) {
+                        document[sym] = true;
                         var st = document.createElement('style');
-                        st.id = focusStyleId;
                         st.innerHTML = `
                             *:focus, *:focus-visible {
                                 outline: 3px solid #00E5FF !important;

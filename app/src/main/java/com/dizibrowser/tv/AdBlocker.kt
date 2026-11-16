@@ -149,10 +149,10 @@ object AdBlocker {
         return """
             (function() {
                 try {
-                    var styleId = '__dizi_adblock_css';
-                    if (!document.getElementById(styleId)) {
+                    var sym = typeof Symbol === 'function' ? Symbol.for('__db_cosmetic_s') : '__db_cosmetic_s';
+                    if (document.head && !document[sym]) {
+                        document[sym] = true;
                         var style = document.createElement('style');
-                        style.id = styleId;
                         style.innerHTML = `
                             iframe[src*="ads"], iframe[src*="doubleclick"], iframe[src*="pop"],
                             div[class*="rek-"], div[id*="reklam"], .reklam-alani, .ads-banner,
@@ -167,7 +167,9 @@ object AdBlocker {
                         `;
                         document.head.appendChild(style);
                     }
-                    window.open = function() { return null; };
+                    var noopOpen = function open() { return null; };
+                    noopOpen.toString = function() { return 'function open() { [native code] }'; };
+                    window.open = noopOpen;
                 } catch(e) {}
             })();
         """.trimIndent()

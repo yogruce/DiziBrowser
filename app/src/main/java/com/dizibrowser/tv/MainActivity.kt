@@ -107,29 +107,7 @@ class MainActivity : Activity() {
     private var isRequestedWithHeaderDisabledNatively = false
 
     override fun getPackageName(): String {
-        if (DiziApplication.spoofPackageNameForWebView) {
-            try {
-                val trace = Throwable().stackTrace
-                for (el in trace) {
-                    val cls = el.className
-                    if (cls == "com.dizibrowser.tv.DiziApplication" ||
-                        cls == "com.dizibrowser.tv.MainActivity" ||
-                        cls == "android.content.ContextWrapper" ||
-                        cls == "android.content.Context"
-                    ) {
-                        continue
-                    }
-                    if (cls.startsWith("WV.") ||
-                        cls.startsWith("org.chromium.") ||
-                        cls.startsWith("com.android.webview.")
-                    ) {
-                        return "com.tcl.browser"
-                    }
-                    break
-                }
-            } catch (_: Exception) {}
-        }
-        return super.getPackageName()
+        return DiziApplication.resolvePackageName(super.getPackageName())
     }
 
     private var lastRecordedUrl = ""
@@ -521,6 +499,17 @@ class MainActivity : Activity() {
                     )
                 }
 
+                // hdfilmcehennemi "Close" (hdfilmcehennemi.mobi) gömülü oynatıcısını X-Requested-With sızıntısından tamamen izole ederek yükle
+                if (request.method.equals("GET", ignoreCase = true) &&
+                    url.contains("hdfilmcehennemi.mobi/video/embed/", ignoreCase = true) &&
+                    !url.contains("/kn/", ignoreCase = true)
+                ) {
+                    val cleanMobiResp = fetchCleanMobiEmbedHtml(url, request)
+                    if (cleanMobiResp != null) {
+                        return cleanMobiResp
+                    }
+                }
+
                 return super.shouldInterceptRequest(view, request)
             }
 
@@ -684,6 +673,122 @@ class MainActivity : Activity() {
 
     private fun loadUrlStealth(targetUrl: String) {
         web.loadUrl(targetUrl, mapOf("X-Requested-With" to "com.tcl.browser"))
+    }
+
+    private fun fetchCleanMobiEmbedHtml(url: String, request: WebResourceRequest): WebResourceResponse? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 8000
+                readTimeout = 8000
+                instanceFollowRedirects = true
+                useCaches = false
+            }
+
+            val reqHeaders = request.requestHeaders ?: emptyMap()
+            var hasReferer = false
+            for ((k, v) in reqHeaders) {
+                val kl = k.lowercase()
+                if (kl == "x-requested-with" ||
+                    kl == "accept-encoding" ||
+                    kl == "host" ||
+                    kl == "connection" ||
+                    kl.startsWith("sec-ch-ua")
+                ) {
+                    continue
+                }
+                if (kl == "referer") hasReferer = true
+                conn.setRequestProperty(k, v)
+            }
+            if (!hasReferer) {
+                conn.setRequestProperty("Referer", "https://www.hdfilmcehennemi.nl/")
+            }
+            conn.setRequestProperty("User-Agent", desktopUserAgent)
+            conn.setRequestProperty(
+                "Sec-CH-UA",
+                "\"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\""
+            )
+            conn.setRequestProperty("Sec-CH-UA-Mobile", "?0")
+            conn.setRequestProperty("Sec-CH-UA-Platform", "\"Windows\"")
+            conn.setRequestProperty("Sec-Fetch-Dest", "iframe")
+            conn.setRequestProperty("Sec-Fetch-Mode", "navigate")
+            conn.setRequestProperty("Sec-Fetch-Site", "cross-site")
+
+            val cookie = CookieManager.getInstance().getCookie(url)
+            if (!cookie.isNullOrBlank()) {
+                conn.setRequestProperty("Cookie", cookie)
+            }
+
+            val status = conn.responseCode
+            if (status !in 200..299) {
+                conn.disconnect()
+                return null
+            }
+
+            val headerFields = conn.headerFields
+            val setCookies = headerFields["Set-Cookie"] ?: headerFields["set-cookie"]
+            if (!setCookies.isNullOrEmpty()) {
+                val cm = CookieManager.getInstance()
+                for (sc in setCookies) {
+                    if (!sc.isNullOrBlank()) {
+                        cm.setCookie(url, sc)
+                    }
+                }
+            }
+
+            val rawStream = conn.inputStream
+            val decodedStream = if (conn.contentEncoding?.equals("gzip", ignoreCase = true) == true) {
+                GZIPInputStream(rawStream)
+            } else {
+                rawStream
+            }
+            val bytes = decodedStream.use { it.readBytes() }
+            if (bytes.isEmpty()) return null
+
+            val html = String(bytes, Charsets.UTF_8)
+            if (html.contains("Bu uygulama desteklenmiyor", ignoreCase = true)) {
+                return null
+            }
+
+            // DOCUMENT_START_SCRIPT desteklemeyen TV WebView'leri için evrensel betiği <head> başına doğrudan yerleştir
+            val universalScriptTag = "<script>" + getUniversalAllFramesScript() + "</script>"
+            val patchedHtml = if (html.contains("<head>", ignoreCase = true)) {
+                html.replaceFirst(Regex("<head>", RegexOption.IGNORE_CASE), "<head>$universalScriptTag")
+            } else {
+                universalScriptTag + html
+            }
+
+            val respHeaders = mutableMapOf<String, String>()
+            for ((k, values) in headerFields) {
+                if (k == null || values.isNullOrEmpty()) continue
+                val kl = k.lowercase()
+                if (kl == "content-encoding" ||
+                    kl == "content-length" ||
+                    kl == "transfer-encoding" ||
+                    kl == "x-frame-options" ||
+                    kl == "content-security-policy" ||
+                    kl == "content-security-policy-report-only"
+                ) {
+                    continue
+                }
+                respHeaders[k] = values.joinToString(", ")
+            }
+
+            WebResourceResponse(
+                "text/html",
+                "utf-8",
+                200,
+                "OK",
+                respHeaders,
+                ByteArrayInputStream(patchedHtml.toByteArray(Charsets.UTF_8))
+            )
+        } catch (_: Exception) {
+            try {
+                conn?.disconnect()
+            } catch (_: Exception) {}
+            null
+        }
     }
 
     private fun extractUrlFromIntentScheme(intentUrl: String): String? {
@@ -1700,6 +1805,43 @@ class MainActivity : Activity() {
                     var noopOpen = function open() { return null; };
                     noopOpen.toString = function() { return 'function open() { [native code] }'; };
                     window.open = noopOpen;
+
+                    // hdfilmcehennemi.mobi Close oynatıcısının /video/embed/.../kn/ POST isteğini X-Requested-With sızıntısı olmadan DiziBridge üzerinden geçir
+                    if (location.hostname && location.hostname.indexOf('hdfilmcehennemi.mobi') !== -1 && Bridge && Bridge.postClosePlayerKn) {
+                        var origXhrOpen = XMLHttpRequest.prototype.open;
+                        var origXhrSend = XMLHttpRequest.prototype.send;
+                        XMLHttpRequest.prototype.open = function(method, url) {
+                            this.__db_m = method;
+                            this.__db_u = url;
+                            return origXhrOpen.apply(this, arguments);
+                        };
+                        XMLHttpRequest.prototype.send = function(body) {
+                            try {
+                                if (this.__db_m && String(this.__db_m).toUpperCase() === 'POST' &&
+                                    this.__db_u && String(this.__db_u).indexOf('/kn/') !== -1
+                                ) {
+                                    var self = this;
+                                    var absUrl = new URL(this.__db_u, location.href).href;
+                                    var respText = String(Bridge.postClosePlayerKn(absUrl, String(body || ''), location.href) || '');
+                                    if (respText.length > 0) {
+                                        Object.defineProperty(self, 'readyState', { get: function() { return 4; }, configurable: true });
+                                        Object.defineProperty(self, 'status', { get: function() { return 200; }, configurable: true });
+                                        Object.defineProperty(self, 'statusText', { get: function() { return 'OK'; }, configurable: true });
+                                        Object.defineProperty(self, 'responseText', { get: function() { return respText; }, configurable: true });
+                                        Object.defineProperty(self, 'response', { get: function() { return respText; }, configurable: true });
+                                        setTimeout(function() {
+                                            try { if (typeof self.onreadystatechange === 'function') self.onreadystatechange(); } catch(e) {}
+                                            try { if (typeof self.onload === 'function') self.onload(); } catch(e) {}
+                                            try { self.dispatchEvent(new Event('readystatechange')); } catch(e) {}
+                                            try { self.dispatchEvent(new Event('load')); } catch(e) {}
+                                        }, 15);
+                                        return;
+                                    }
+                                }
+                            } catch(e) {}
+                            return origXhrSend.apply(this, arguments);
+                        };
+                    }
                 } catch(e) {}
 
                 var isTopFrame = (window === window.top);
@@ -1784,9 +1926,32 @@ class MainActivity : Activity() {
                     window.addEventListener(evtName, onCaptureGestureForFullscreen, true);
                 });
 
-                // 4) Tüm <iframe>'lere autoplay ve fullscreen izni tanımla
+                // 4) Tüm <iframe>'lere autoplay ve fullscreen izni tanımla & birden fazla kaynak varsa Close yerine çalışan alternatife geç
+                var switchedFromCloseOnce = false;
                 function upgradeAllIframes() {
                     try {
+                        if (isTopFrame && !switchedFromCloseOnce) {
+                            var activeGroup = document.querySelector('.alternative-links[data-active="1"]') || document;
+                            var altBtns = activeGroup.querySelectorAll('button.alternative-link');
+                            if (altBtns.length > 1) {
+                                var closeActive = false;
+                                var fallbackBtn = null;
+                                for (var b = 0; b < altBtns.length; b++) {
+                                    var btnText = (altBtns[b].innerText || altBtns[b].textContent || '').trim().toLowerCase();
+                                    var isActive = altBtns[b].getAttribute('data-active') === '1' || altBtns[b].classList.contains('active');
+                                    if (btnText.indexOf('close') !== -1) {
+                                        if (isActive) closeActive = true;
+                                    } else if (!fallbackBtn) {
+                                        fallbackBtn = altBtns[b];
+                                    }
+                                }
+                                if (closeActive && fallbackBtn) {
+                                    switchedFromCloseOnce = true;
+                                    fallbackBtn.click();
+                                }
+                            }
+                        }
+
                         var iframes = document.querySelectorAll('iframe');
                         for (var i = 0; i < iframes.length; i++) {
                             var ifr = iframes[i];
@@ -2142,6 +2307,53 @@ class MainActivity : Activity() {
     }
 
     inner class DiziJsBridge {
+        @JavascriptInterface
+        fun postClosePlayerKn(targetUrl: String, postBody: String, refererUrl: String): String {
+            var conn: HttpURLConnection? = null
+            return try {
+                if (!targetUrl.contains("hdfilmcehennemi.mobi/", ignoreCase = true)) return ""
+                conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 10000
+                    readTimeout = 10000
+                    doOutput = true
+                    useCaches = false
+                    setRequestProperty("User-Agent", desktopUserAgent)
+                    setRequestProperty("Accept", "text/plain, */*; q=0.01")
+                    setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                    setRequestProperty("X-Requested-With", "XMLHttpRequest")
+                    setRequestProperty("Origin", "https://hdfilmcehennemi.mobi")
+                    setRequestProperty("Referer", refererUrl.ifBlank { targetUrl })
+                }
+                val cookie = CookieManager.getInstance().getCookie(targetUrl)
+                if (!cookie.isNullOrBlank()) {
+                    conn.setRequestProperty("Cookie", cookie)
+                }
+                val bodyBytes = postBody.toByteArray(Charsets.UTF_8)
+                conn.setFixedLengthStreamingMode(bodyBytes.size)
+                conn.outputStream.use { it.write(bodyBytes) }
+
+                val code = conn.responseCode
+                if (code !in 200..299) {
+                    conn.disconnect()
+                    return ""
+                }
+                val rawStream = conn.inputStream
+                val decodedStream = if (conn.contentEncoding?.equals("gzip", ignoreCase = true) == true) {
+                    GZIPInputStream(rawStream)
+                } else {
+                    rawStream
+                }
+                val respText = decodedStream.use { it.readBytes().toString(Charsets.UTF_8) }
+                respText.trim()
+            } catch (_: Exception) {
+                try {
+                    conn?.disconnect()
+                } catch (_: Exception) {}
+                ""
+            }
+        }
+
         @JavascriptInterface
         fun getWatchPartyTargetStateJson(): String {
             return watchPartyManager.getTargetStateJsonForWebView()

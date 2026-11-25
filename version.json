@@ -1,6 +1,6 @@
 {
-  "versionCode": 17,
-  "versionName": "1.6.8",
+  "versionCode": 18,
+  "versionName": "1.6.9",
   "apkUrl": "https://raw.githubusercontent.com/yogruce/DiziBrowser/main/DiziBrowser-TV-v1.0.apk",
-  "changelog": "• Tek Seçenekli 'Close' (hdfilmcehennemi.mobi) Oynatıcı Kesin Çözümü (v1.6.8): Tüm sistem WebView sürümlerinde (R8/Trichrome dahil) X-Requested-With sızıntısını tamamen kapatan tersine paket maskelemesi eklendi.\n• hdfilmcehennemi.mobi gömülü oynatıcısı (GET /video/embed/...) ve video şifre çözücü isteği (POST /kn/) doğrudan temiz HTTP katmanından geçirilerek 'Bu uygulama desteklenmiyor / Chrome'da aç' hatası kesin olarak ortadan kaldırıldı."
+  "changelog": "• Açılış Çökmesi Düzeltmesi & Tek Seçenekli 'Close' Oynatıcı Çözümü (v1.6.9): WebView başlatılırken oluşan paket adı çakışması (NameNotFoundException) giderildi.\n• hdfilmcehennemi.mobi gömülü oynatıcısı (GET /video/embed/...) ve video şifre çözücü isteği (POST /kn/) doğrudan temiz HTTP katmanından geçirilerek 'Bu uygulama desteklenmiyor / Chrome'da aç' hatası kesin olarak ortadan kaldırıldı."
 }

@@ -1,6 +1,6 @@
 {
-  "versionCode": 15,
-  "versionName": "1.6.6",
+  "versionCode": 16,
+  "versionName": "1.6.7",
   "apkUrl": "https://raw.githubusercontent.com/yogruce/DiziBrowser/main/DiziBrowser-TV-v1.0.apk",
-  "changelog": "• hdfilmcehennemi 'Close' (hdfilmcehennemi.mobi) Oynatıcı Engeli Çözümü (v1.6.6): Sitede varsayılan açılan ve APK içinde 'Bu uygulama desteklenmiyor' hatası veren Close oynatıcısı algılandığında otomatik olarak çalışan Rapidrame (/rplayer/) oynatıcısına geçiş sağlandı.\n• R8 ile gizlenmiş (WV.*) sistem WebView sınıfları için X-Requested-With paket maskelemesi güçlendirildi."
+  "changelog": "• Tek Seçenekli 'Close' (hdfilmcehennemi.mobi) Oynatıcı Çözümü (v1.6.7): Yalnızca 'Close' seçeneği bulunan dizi bölümlerinde (örn. Evil 2. Sezon 7. Bölüm) oluşan 403/Chrome'da açınız hatası giderildi.\n• Bozuk /rplayer/ yönlendirmesi kaldırıldı ve WebView motorunun ilk başlatılışındaki (BuildInfo) X-Requested-With sızıntısı kapatılarak Close oynatıcısının doğrudan açılması sağlandı."
 }

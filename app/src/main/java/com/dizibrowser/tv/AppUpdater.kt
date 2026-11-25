@@ -20,6 +20,7 @@ import java.net.URL
 
 object AppUpdater {
 
+    private const val REAL_APP_PACKAGE = "com.dizibrowser.tv"
     private const val VERSION_JSON_URL =
         "https://raw.githubusercontent.com/yogruce/DiziBrowser/main/version.json"
     private const val DEFAULT_APK_URL =
@@ -27,7 +28,7 @@ object AppUpdater {
 
     fun getCurrentVersionCode(activity: Activity): Int {
         return try {
-            val pInfo = activity.packageManager.getPackageInfo(activity.packageName, 0)
+            val pInfo = activity.packageManager.getPackageInfo(REAL_APP_PACKAGE, 0)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 pInfo.longVersionCode.toInt()
             } else {
@@ -41,7 +42,7 @@ object AppUpdater {
 
     fun getCurrentVersionName(activity: Activity): String {
         return try {
-            val pInfo = activity.packageManager.getPackageInfo(activity.packageName, 0)
+            val pInfo = activity.packageManager.getPackageInfo(REAL_APP_PACKAGE, 0)
             pInfo.versionName ?: "1.0"
         } catch (_: Exception) {
             "1.0"
@@ -137,7 +138,7 @@ object AppUpdater {
                 try {
                     val intent = Intent(
                         Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        Uri.parse("package:${activity.packageName}")
+                        Uri.parse("package:$REAL_APP_PACKAGE")
                     )
                     activity.startActivity(intent)
                 } catch (_: Exception) {}
@@ -211,7 +212,7 @@ object AppUpdater {
             val apkUri: Uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 FileProvider.getUriForFile(
                     activity,
-                    "${activity.packageName}.fileprovider",
+                    "$REAL_APP_PACKAGE.fileprovider",
                     apkFile
                 )
             } else {

@@ -352,11 +352,7 @@ class MainActivity : Activity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
-        // Önce WebView motorunu ve BuildInfo'yu gerçek paket adıyla başlat, ardından AwSettings için X-Requested-With maskesini aç
-        try {
-            DiziApplication.spoofPackageNameForWebView = false
-            WebSettings.getDefaultUserAgent(this)
-        } catch (_: Exception) {}
+        // WebView ve BuildInfo ilk kez başlatılırken de X-Requested-With paket maskesi (com.tcl.browser) aktif olmalı
         DiziApplication.spoofPackageNameForWebView = true
 
         web = object : WebView(this) {
@@ -523,60 +519,6 @@ class MainActivity : Activity() {
                         emptyMap(),
                         ByteArrayInputStream(ByteArray(0))
                     )
-                }
-
-                // hdfilmcehennemi "Close" (hdfilmcehennemi.mobi) gömülü oynatıcısı WebView'i engellediğinde otomatik olarak çalışan Rapidrame (/rplayer/) oynatıcısına yönlendir
-                if (url.contains("hdfilmcehennemi.mobi/video/embed/", ignoreCase = true)) {
-                    val rapidId = try {
-                        request.url.getQueryParameter("rapidrame_id")
-                    } catch (_: Exception) {
-                        null
-                    }
-                    if (!rapidId.isNullOrBlank()) {
-                        val referer = request.requestHeaders?.get("Referer")
-                            ?: request.requestHeaders?.get("referer")
-                            ?: "https://www.hdfilmcehennemi.nl/"
-                        val refUri = try { Uri.parse(referer) } catch (_: Exception) { null }
-                        val origin = if (refUri != null && !refUri.scheme.isNullOrBlank() && !refUri.host.isNullOrBlank()) {
-                            "${refUri.scheme}://${refUri.host}"
-                        } else {
-                            "https://www.hdfilmcehennemi.nl"
-                        }
-                        val targetRplayer = "$origin/rplayer/$rapidId/"
-                        runOnUiThread {
-                            try {
-                                view.evaluateJavascript(
-                                    """
-                                    (function() {
-                                        var iframes = document.querySelectorAll('iframe');
-                                        for (var i = 0; i < iframes.length; i++) {
-                                            var s = iframes[i].getAttribute('src') || iframes[i].getAttribute('data-src') || '';
-                                            if (s.indexOf('hdfilmcehennemi.mobi') !== -1) {
-                                                iframes[i].setAttribute('data-src', '$targetRplayer');
-                                                iframes[i].setAttribute('src', '$targetRplayer');
-                                            }
-                                        }
-                                    })();
-                                    """.trimIndent(),
-                                    null
-                                )
-                            } catch (_: Exception) {}
-                        }
-                        val redirectHtml = """
-                            <!DOCTYPE html>
-                            <html><head><meta charset="utf-8">
-                            <script>window.location.replace("$targetRplayer");</script>
-                            </head><body style="background:#000;margin:0"></body></html>
-                        """.trimIndent()
-                        return WebResourceResponse(
-                            "text/html",
-                            "utf-8",
-                            200,
-                            "OK",
-                            mapOf("Cache-Control" to "no-store"),
-                            ByteArrayInputStream(redirectHtml.toByteArray(Charsets.UTF_8))
-                        )
-                    }
                 }
 
                 return super.shouldInterceptRequest(view, request)
@@ -1842,30 +1784,9 @@ class MainActivity : Activity() {
                     window.addEventListener(evtName, onCaptureGestureForFullscreen, true);
                 });
 
-                // 4) Tüm <iframe>'lere autoplay ve fullscreen izni tanımla & hdfilmcehennemi "Close" (hdfilmcehennemi.mobi) engelini Rapidrame (/rplayer/) ile otomatik aş
-                var switchedToRapidrameOnce = false;
+                // 4) Tüm <iframe>'lere autoplay ve fullscreen izni tanımla
                 function upgradeAllIframes() {
                     try {
-                        if (isTopFrame && !switchedToRapidrameOnce) {
-                            var altBtns = document.querySelectorAll('button.alternative-link, .alternative-links button');
-                            var closeActive = false;
-                            var rapidBtn = null;
-                            for (var b = 0; b < altBtns.length; b++) {
-                                var btnText = (altBtns[b].innerText || altBtns[b].textContent || '').trim().toLowerCase();
-                                var isActive = altBtns[b].getAttribute('data-active') === '1' || altBtns[b].classList.contains('active');
-                                if (btnText.indexOf('close') !== -1 && isActive) {
-                                    closeActive = true;
-                                }
-                                if (btnText.indexOf('rapid') !== -1) {
-                                    rapidBtn = altBtns[b];
-                                }
-                            }
-                            if (closeActive && rapidBtn) {
-                                switchedToRapidrameOnce = true;
-                                rapidBtn.click();
-                            }
-                        }
-
                         var iframes = document.querySelectorAll('iframe');
                         for (var i = 0; i < iframes.length; i++) {
                             var ifr = iframes[i];
@@ -1876,36 +1797,7 @@ class MainActivity : Activity() {
                                 ifr.setAttribute('webkitallowfullscreen', 'true');
                                 ifr.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
                             }
-                            var rawSrc = ifr.getAttribute('src') || '';
-                            var rawDataSrc = ifr.getAttribute('data-src') || '';
-                            var combined = rawSrc || rawDataSrc;
-                            if (combined.indexOf('hdfilmcehennemi.mobi/video/embed/') !== -1) {
-                                var m = combined.match(/[?&]rapidrame_id=([a-zA-Z0-9_-]+)/i);
-                                if (m && m[1]) {
-                                    var rplayerUrl = location.origin + '/rplayer/' + m[1] + '/';
-                                    if (rawDataSrc && rawDataSrc !== rplayerUrl) {
-                                        ifr.setAttribute('data-src', rplayerUrl);
-                                    }
-                                    if (rawSrc && rawSrc !== rplayerUrl) {
-                                        ifr.setAttribute('src', rplayerUrl);
-                                    }
-                                }
-                            }
                         }
-                    } catch(e) {}
-                }
-
-                if (isTopFrame && typeof MutationObserver === 'function') {
-                    try {
-                        var obs = new MutationObserver(function() {
-                            upgradeAllIframes();
-                        });
-                        obs.observe(document.documentElement || document, {
-                            childList: true,
-                            subtree: true,
-                            attributes: true,
-                            attributeFilter: ['src', 'data-src']
-                        });
                     } catch(e) {}
                 }
 

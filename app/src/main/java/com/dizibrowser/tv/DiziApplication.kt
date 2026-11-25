@@ -6,7 +6,7 @@ class DiziApplication : Application() {
 
     companion object {
         @Volatile
-        var spoofPackageNameForWebView: Boolean = false
+        var spoofPackageNameForWebView: Boolean = true
     }
 
     override fun getPackageName(): String {

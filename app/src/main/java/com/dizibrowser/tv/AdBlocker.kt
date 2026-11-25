@@ -37,7 +37,7 @@ object AdBlocker {
     private val blockedPathKeywords = arrayOf(
         "/ads/", "/adserver/", "/popunder", "/popup.js", "/pop.js",
         "banner_ad", "ad_iframe", "clickunder", "/advert/", "prebid",
-        "devtools-console-detect", "/rplayer/404/"
+        "devtools-console-detect", "/rplayer/404/", "/video/embed/404/"
     )
 
     private val dangerousExtensions = arrayOf(
